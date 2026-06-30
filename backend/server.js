@@ -14,7 +14,27 @@ app.use(express.json());
 const upload = multer({ storage: multer.memoryStorage() });
 
 const JWT_SECRET = "woshilanqiuzhishen"; //用于加密令牌
+// 验证管理员登录令牌的中间件，挂在需要登录才能访问的接口前面
+function verifyAdminToken(req, res, next) {
+  const authHeader = req.headers.authorization; // 前端会把token放在请求头里传过来
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res
+      .status(401)
+      .json({ success: false, message: "未登录或登录已过期" });
+  }
 
+  const token = authHeader.split(" ")[1];
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.admin = decoded; // 把解码后的信息（adminId, username, role）挂在req上，后面的接口能直接用
+    next();
+  } catch (err) {
+    return res
+      .status(401)
+      .json({ success: false, message: "登录已过期，请重新登录" });
+  }
+}
 const dbConfig = {
   host: "localhost",
   user: "root",
@@ -250,6 +270,75 @@ app.post("/api/admin/login", async (req, res) => {
 });
 
 const PORT = 3000;
+// 获取问卷列表，按角色过滤：导师看全部，研究者只看自己创建的
+app.get("/api/questionnaires", verifyAdminToken, async (req, res) => {
+  try {
+    const connection = await mysql.createConnection(dbConfig);
+
+    let sql, params;
+    if (req.admin.role === "supervisor") {
+      // 导师：查所有问卷，顺带查出创建者姓名方便前端展示
+      sql = `
+        SELECT q.*, a.display_name AS creator_name,
+          (SELECT COUNT(*) FROM questions WHERE questionnaire_id = q.id) AS question_count
+        FROM questionnaires q
+        LEFT JOIN admins a ON q.created_by = a.id
+        ORDER BY q.created_at DESC
+      `;
+      params = [];
+    } else {
+      // 普通研究者：只查自己创建的
+      sql = `
+        SELECT q.*, a.display_name AS creator_name,
+          (SELECT COUNT(*) FROM questions WHERE questionnaire_id = q.id) AS question_count
+        FROM questionnaires q
+        LEFT JOIN admins a ON q.created_by = a.id
+        WHERE q.created_by = ?
+        ORDER BY q.created_at DESC
+      `;
+      params = [req.admin.adminId];
+    }
+
+    const [rows] = await connection.execute(sql, params);
+    await connection.end();
+
+    res.json({ success: true, questionnaires: rows });
+  } catch (err) {
+    console.error("获取问卷列表失败:", err);
+    res.status(500).json({ success: false, message: "服务器错误" });
+  }
+});
+
+// 新建问卷
+app.post("/api/questionnaires", verifyAdminToken, async (req, res) => {
+  const { title, description, track_timing, consent_text } = req.body;
+
+  if (!title) {
+    return res
+      .status(400)
+      .json({ success: false, message: "问卷标题不能为空" });
+  }
+
+  try {
+    const connection = await mysql.createConnection(dbConfig);
+    const [result] = await connection.execute(
+      "INSERT INTO questionnaires (title, description, track_timing, consent_text, created_by) VALUES (?, ?, ?, ?, ?)",
+      [
+        title,
+        description || "",
+        track_timing !== false,
+        consent_text || "",
+        req.admin.adminId,
+      ],
+    );
+    await connection.end();
+
+    res.json({ success: true, message: "问卷创建成功", id: result.insertId });
+  } catch (err) {
+    console.error("创建问卷失败:", err);
+    res.status(500).json({ success: false, message: "服务器错误" });
+  }
+});
 app.listen(PORT, () => {
   console.log(`后端服务已启动，访问 http://localhost:${PORT}`);
 });

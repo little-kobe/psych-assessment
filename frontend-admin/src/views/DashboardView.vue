@@ -6,8 +6,64 @@ const router = useRouter();
 const displayName = ref("");
 const role = ref("");
 
+const questionnaires = ref([]);
+const loading = ref(false);
+const showCreateDialog = ref(false);
+const newQuestionnaire = ref({
+  title: "",
+  description: "",
+  track_timing: true,
+});
+
+async function fetchQuestionnaires() {
+  loading.value = true;
+  const token = localStorage.getItem("admin_token");
+  try {
+    const response = await fetch("http://localhost:3000/api/questionnaires", {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const data = await response.json();
+    if (data.success) {
+      questionnaires.value = data.questionnaires;
+    }
+  } catch (err) {
+    console.error("获取问卷列表失败:", err);
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function createQuestionnaire() {
+  const token = localStorage.getItem("admin_token");
+  try {
+    const response = await fetch("http://localhost:3000/api/questionnaires", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(newQuestionnaire.value),
+    });
+    const data = await response.json();
+    if (data.success) {
+      showCreateDialog.value = false;
+      newQuestionnaire.value = {
+        title: "",
+        description: "",
+        track_timing: true,
+      };
+      fetchQuestionnaires(); // 创建成功后刷新列表
+    }
+  } catch (err) {
+    console.error("创建问卷失败:", err);
+  }
+}
+
+function goImport(questionnaireId) {
+  router.push(`/import?qid=${questionnaireId}`);
+}
+
 onMounted(() => {
-  // 检查是否已登录，没登录就踢回登录页
   const token = localStorage.getItem("admin_token");
   if (!token) {
     router.push("/login");
@@ -15,6 +71,7 @@ onMounted(() => {
   }
   displayName.value = localStorage.getItem("admin_name") || "";
   role.value = localStorage.getItem("admin_role") || "";
+  fetchQuestionnaires(); // 登录检查通过后，加载问卷列表
 });
 
 function handleLogout() {
@@ -68,7 +125,66 @@ const roleLabel = () => (role.value === "supervisor" ? "导师" : "研究者");
       </el-header>
 
       <el-main class="main">
-        <el-empty description="这里以后会显示问卷列表，下一步我们就来做这个" />
+        <div class="toolbar">
+          <h2>问卷列表</h2>
+          <el-button type="primary" @click="showCreateDialog = true"
+            >新建问卷</el-button
+          >
+        </div>
+
+        <el-table
+          :data="questionnaires"
+          v-loading="loading"
+          style="width: 100%"
+        >
+          <el-table-column prop="title" label="问卷标题" />
+          <el-table-column prop="creator_name" label="创建人" width="120" />
+          <el-table-column prop="question_count" label="题目数" width="90" />
+          <el-table-column label="记录时长" width="100">
+            <template #default="scope">
+              <el-tag
+                :type="scope.row.track_timing ? 'success' : 'info'"
+                size="small"
+              >
+                {{ scope.row.track_timing ? "已开启" : "未开启" }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="160">
+            <template #default="scope">
+              <el-button size="small" @click="goImport(scope.row.id)"
+                >导入题目</el-button
+              >
+            </template>
+          </el-table-column>
+        </el-table>
+
+        <el-dialog v-model="showCreateDialog" title="新建问卷" width="420px">
+          <el-form :model="newQuestionnaire" label-width="90px">
+            <el-form-item label="问卷标题">
+              <el-input
+                v-model="newQuestionnaire.title"
+                placeholder="例如：SCL-90症状自评量表"
+              />
+            </el-form-item>
+            <el-form-item label="问卷说明">
+              <el-input
+                v-model="newQuestionnaire.description"
+                type="textarea"
+                :rows="2"
+              />
+            </el-form-item>
+            <el-form-item label="记录时长">
+              <el-switch v-model="newQuestionnaire.track_timing" />
+            </el-form-item>
+          </el-form>
+          <template #footer>
+            <el-button @click="showCreateDialog = false">取消</el-button>
+            <el-button type="primary" @click="createQuestionnaire"
+              >确认创建</el-button
+            >
+          </template>
+        </el-dialog>
       </el-main>
     </el-container>
   </el-container>
