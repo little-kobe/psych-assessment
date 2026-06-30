@@ -339,6 +339,51 @@ app.post("/api/questionnaires", verifyAdminToken, async (req, res) => {
     res.status(500).json({ success: false, message: "服务器错误" });
   }
 });
+
+// 获取单份问卷详情（含题目列表），带权限校验：研究者只能看自己的
+app.get("/api/questionnaires/:id", verifyAdminToken, async (req, res) => {
+  const questionnaireId = req.params.id;
+
+  try {
+    const connection = await mysql.createConnection(dbConfig);
+
+    const [qRows] = await connection.execute(
+      "SELECT q.*, a.display_name AS creator_name FROM questionnaires q LEFT JOIN admins a ON q.created_by = a.id WHERE q.id = ?",
+      [questionnaireId],
+    );
+
+    if (qRows.length === 0) {
+      await connection.end();
+      return res.status(404).json({ success: false, message: "问卷不存在" });
+    }
+
+    const questionnaire = qRows[0];
+
+    // 权限检查：普通研究者只能看自己创建的问卷详情
+    if (
+      req.admin.role !== "supervisor" &&
+      questionnaire.created_by !== req.admin.adminId
+    ) {
+      await connection.end();
+      return res
+        .status(403)
+        .json({ success: false, message: "没有权限查看这份问卷" });
+    }
+
+    const [questionRows] = await connection.execute(
+      "SELECT * FROM questions WHERE questionnaire_id = ? ORDER BY order_num ASC",
+      [questionnaireId],
+    );
+
+    await connection.end();
+
+    res.json({ success: true, questionnaire, questions: questionRows });
+  } catch (err) {
+    console.error("获取问卷详情失败:", err);
+    res.status(500).json({ success: false, message: "服务器错误" });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`后端服务已启动，访问 http://localhost:${PORT}`);
 });

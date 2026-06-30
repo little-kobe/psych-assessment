@@ -137,7 +137,15 @@ const roleLabel = () => (role.value === "supervisor" ? "导师" : "研究者");
           v-loading="loading"
           style="width: 100%"
         >
-          <el-table-column prop="title" label="问卷标题" />
+          <el-table-column label="问卷标题">
+            <template #default="scope">
+              <el-link
+                type="primary"
+                @click="$router.push(`/questionnaire/${scope.row.id}`)"
+                >{{ scope.row.title }}</el-link
+              >
+            </template>
+          </el-table-column>
           <el-table-column prop="creator_name" label="创建人" width="120" />
           <el-table-column prop="question_count" label="题目数" width="90" />
           <el-table-column label="记录时长" width="100">
