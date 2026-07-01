@@ -1,19 +1,23 @@
 <script setup>
 import { ref, onMounted, computed } from "vue";
-
 import { useRoute } from "vue-router";
+
 const route = useRoute();
 const questionnaireId = Number(route.params.id) || 1;
 const questionnaire = ref(null);
 const questions = ref([]);
 const answersMap = ref({});
-const questionStartTimes = ref({});
-const consented = ref(false); // 是否已阅读并同意知情同意书
 const submitted = ref(false);
-const resultMessage = ref("");
+const consented = ref(false);
 const loading = ref(true);
 const overallStartTime = ref(null);
-const currentIndex = ref(0); // 当前展示第几题，逐题展示
+const currentIndex = ref(0);
+
+// 关键改动：每道题独立记录开始时间和累计用时
+// 用累计用时而不是单次开始时间，是因为用户可能"上一题"回去修改答案
+// 每次离开这道题时把本次停留时长累加进去，避免重复计算
+const questionDurations = ref({}); // 每道题累计用时，单位毫秒
+const currentQuestionStartTime = ref(null); // 当前这道题"本次"开始看的时间戳
 
 const currentQuestion = computed(() => questions.value[currentIndex.value]);
 const progressPercent = computed(() => {
@@ -38,8 +42,15 @@ onMounted(async () => {
       questionnaire.value = data.questionnaire;
       questions.value = data.questions;
       overallStartTime.value = Date.now();
+
+      // 初始化每道题的累计用时为0
+      data.questions.forEach((q) => {
+        questionDurations.value[q.id] = 0;
+      });
+
+      // 开始对第一道题计时
       if (data.questions.length > 0) {
-        questionStartTimes.value[data.questions[0].id] = Date.now();
+        currentQuestionStartTime.value = Date.now();
       }
     }
   } catch (err) {
@@ -49,6 +60,14 @@ onMounted(async () => {
   }
 });
 
+// 离开当前题目时调用：把本次停留时长累加到这道题的总时长里
+function recordCurrentQuestionTime() {
+  if (!currentQuestion.value || !currentQuestionStartTime.value) return;
+  const elapsed = Date.now() - currentQuestionStartTime.value;
+  questionDurations.value[currentQuestion.value.id] =
+    (questionDurations.value[currentQuestion.value.id] || 0) + elapsed;
+}
+
 function selectAnswer(value) {
   answersMap.value[currentQuestion.value.id] = value;
 }
@@ -56,30 +75,38 @@ function selectAnswer(value) {
 function nextQuestion() {
   if (currentAnswer.value === undefined || currentAnswer.value === null) return;
 
+  // 离开当前题目前先记录用时
+  recordCurrentQuestionTime();
+
   if (isLastQuestion.value) {
     submitQuestionnaire();
   } else {
     currentIndex.value++;
-    const nextQ = questions.value[currentIndex.value];
-    questionStartTimes.value[nextQ.id] = Date.now();
+    // 进入下一题，重新开始计时
+    currentQuestionStartTime.value = Date.now();
   }
 }
 
 function prevQuestion() {
-  if (currentIndex.value > 0) currentIndex.value--;
+  if (currentIndex.value === 0) return;
+
+  // 离开当前题目前先记录用时
+  recordCurrentQuestionTime();
+
+  currentIndex.value--;
+  // 进入上一题，重新开始计时
+  currentQuestionStartTime.value = Date.now();
 }
 
 async function submitQuestionnaire() {
   const finishedAt = Date.now();
 
-  const answers = questions.value.map((q) => {
-    const startTime = questionStartTimes.value[q.id] || overallStartTime.value;
-    return {
-      question_id: q.id,
-      answer_value: answersMap.value[q.id],
-      duration_ms: finishedAt - startTime,
-    };
-  });
+  // 组装每道题的答案和精确用时
+  const answers = questions.value.map((q) => ({
+    question_id: q.id,
+    answer_value: answersMap.value[q.id],
+    duration_ms: questionDurations.value[q.id] || 0,
+  }));
 
   const response = await fetch("http://localhost:3000/api/submission", {
     method: "POST",
@@ -101,7 +128,6 @@ async function submitQuestionnaire() {
   const data = await response.json();
   if (data.success) {
     submitted.value = true;
-    resultMessage.value = "感谢你完成本次测评";
   }
 }
 </script>

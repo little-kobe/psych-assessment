@@ -180,7 +180,8 @@ app.post(
 
       const connection = await mysql.createConnection(dbConfig);
 
-      let successCount = 0;
+      let insertCount = 0;
+      let updateCount = 0;
       const errors = [];
 
       for (const row of rows) {
@@ -198,14 +199,44 @@ app.post(
             continue;
           }
 
-          await connection.execute(
-            "INSERT INTO questions (questionnaire_id, content, order_num, min_score, max_score, is_reverse_scored) VALUES (?, ?, ?, ?, ?, ?)",
-            [questionnaireId, content, orderNum, minScore, maxScore, isReverse],
+          // 检查这份问卷里这个题号是否已存在
+          const [existing] = await connection.execute(
+            "SELECT id FROM questions WHERE questionnaire_id = ? AND order_num = ?",
+            [questionnaireId, orderNum],
           );
-          successCount++;
+
+          if (existing.length > 0) {
+            // 题号已存在：覆盖更新
+            await connection.execute(
+              "UPDATE questions SET content = ?, min_score = ?, max_score = ?, is_reverse_scored = ? WHERE questionnaire_id = ? AND order_num = ?",
+              [
+                content,
+                minScore,
+                maxScore,
+                isReverse,
+                questionnaireId,
+                orderNum,
+              ],
+            );
+            updateCount++;
+          } else {
+            // 题号不存在：新增插入
+            await connection.execute(
+              "INSERT INTO questions (questionnaire_id, content, order_num, min_score, max_score, is_reverse_scored) VALUES (?, ?, ?, ?, ?, ?)",
+              [
+                questionnaireId,
+                content,
+                orderNum,
+                minScore,
+                maxScore,
+                isReverse,
+              ],
+            );
+            insertCount++;
+          }
         } catch (rowErr) {
           errors.push(
-            `第${row["题号"] || "未知"}题导入失败：${rowErr.message}`,
+            `第${row["题号"] || "未知"}题处理失败：${rowErr.message}`,
           );
         }
       }
@@ -214,9 +245,9 @@ app.post(
 
       res.json({
         success: true,
-        message: `成功导入${successCount}道题`,
-        total: rows.length,
-        successCount,
+        message: `导入完成：新增 ${insertCount} 道题，更新 ${updateCount} 道题`,
+        insertCount,
+        updateCount,
         errors,
       });
     } catch (err) {
@@ -543,6 +574,318 @@ app.get(
     }
   },
 );
+
+// 编辑问卷基本信息
+app.put("/api/questionnaires/:id", verifyAdminToken, async (req, res) => {
+  const questionnaireId = req.params.id;
+  const { title, description, consent_text, track_timing } = req.body;
+
+  if (!title) {
+    return res
+      .status(400)
+      .json({ success: false, message: "问卷标题不能为空" });
+  }
+
+  try {
+    const connection = await mysql.createConnection(dbConfig);
+
+    // 权限检查：普通研究者只能编辑自己的问卷
+    const [qRows] = await connection.execute(
+      "SELECT * FROM questionnaires WHERE id = ?",
+      [questionnaireId],
+    );
+    if (qRows.length === 0) {
+      await connection.end();
+      return res.status(404).json({ success: false, message: "问卷不存在" });
+    }
+    if (
+      req.admin.role !== "supervisor" &&
+      qRows[0].created_by !== req.admin.adminId
+    ) {
+      await connection.end();
+      return res
+        .status(403)
+        .json({ success: false, message: "没有权限编辑此问卷" });
+    }
+
+    await connection.execute(
+      "UPDATE questionnaires SET title = ?, description = ?, consent_text = ?, track_timing = ? WHERE id = ?",
+      [
+        title,
+        description || "",
+        consent_text || "",
+        track_timing !== false,
+        questionnaireId,
+      ],
+    );
+    await connection.end();
+
+    res.json({ success: true, message: "问卷更新成功" });
+  } catch (err) {
+    console.error("编辑问卷失败:", err);
+    res.status(500).json({ success: false, message: "服务器错误" });
+  }
+});
+
+// 获取某份问卷的所有提交记录
+app.get(
+  "/api/questionnaires/:id/submissions",
+  verifyAdminToken,
+  async (req, res) => {
+    const questionnaireId = req.params.id;
+
+    try {
+      const connection = await mysql.createConnection(dbConfig);
+
+      // 权限检查
+      const [qRows] = await connection.execute(
+        "SELECT * FROM questionnaires WHERE id = ?",
+        [questionnaireId],
+      );
+      if (qRows.length === 0) {
+        await connection.end();
+        return res.status(404).json({ success: false, message: "问卷不存在" });
+      }
+      if (
+        req.admin.role !== "supervisor" &&
+        qRows[0].created_by !== req.admin.adminId
+      ) {
+        await connection.end();
+        return res
+          .status(403)
+          .json({ success: false, message: "没有权限查看此问卷数据" });
+      }
+
+      // 查提交记录，同时统计每条提交的答题数量
+      const [submissions] = await connection.execute(
+        `SELECT s.*,
+        TIMESTAMPDIFF(SECOND, s.started_at, s.finished_at) AS duration_seconds,
+        COUNT(a.id) AS answer_count
+       FROM submissions s
+       LEFT JOIN answers a ON a.submission_id = s.id
+       WHERE s.questionnaire_id = ?
+       GROUP BY s.id
+       ORDER BY s.finished_at DESC`,
+        [questionnaireId],
+      );
+
+      await connection.end();
+      res.json({ success: true, submissions, total: submissions.length });
+    } catch (err) {
+      console.error("获取提交记录失败:", err);
+      res.status(500).json({ success: false, message: "服务器错误" });
+    }
+  },
+);
+
+// 获取某份问卷的维度配置
+app.get(
+  "/api/questionnaires/:id/dimensions",
+  verifyAdminToken,
+  async (req, res) => {
+    const questionnaireId = req.params.id;
+    try {
+      const connection = await mysql.createConnection(dbConfig);
+      const [dimensions] = await connection.execute(
+        "SELECT * FROM dimensions WHERE questionnaire_id = ? ORDER BY id ASC",
+        [questionnaireId],
+      );
+      for (const dim of dimensions) {
+        const [questions] = await connection.execute(
+          `SELECT q.id, q.content, q.order_num FROM dimension_questions dq
+         JOIN questions q ON dq.question_id = q.id
+         WHERE dq.dimension_id = ? ORDER BY q.order_num ASC`,
+          [dim.id],
+        );
+        dim.questions = questions;
+      }
+      await connection.end();
+      res.json({ success: true, dimensions });
+    } catch (err) {
+      console.error("获取维度配置失败:", err);
+      res.status(500).json({ success: false, message: "服务器错误" });
+    }
+  },
+);
+
+// 保存维度配置（整份问卷的维度全量更新）
+app.post(
+  "/api/questionnaires/:id/dimensions",
+  verifyAdminToken,
+  async (req, res) => {
+    const questionnaireId = req.params.id;
+    const { dimensions } = req.body;
+
+    if (!Array.isArray(dimensions)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "维度数据格式错误" });
+    }
+
+    const connection = await mysql.createConnection(dbConfig);
+    try {
+      // 权限检查
+      const [qRows] = await connection.execute(
+        "SELECT * FROM questionnaires WHERE id = ?",
+        [questionnaireId],
+      );
+      if (qRows.length === 0) {
+        await connection.end();
+        return res.status(404).json({ success: false, message: "问卷不存在" });
+      }
+      if (
+        req.admin.role !== "supervisor" &&
+        qRows[0].created_by !== req.admin.adminId
+      ) {
+        await connection.end();
+        return res
+          .status(403)
+          .json({ success: false, message: "没有权限修改此问卷" });
+      }
+
+      // 全量更新：先删除这份问卷所有旧维度配置，再重新插入
+      const [oldDims] = await connection.execute(
+        "SELECT id FROM dimensions WHERE questionnaire_id = ?",
+        [questionnaireId],
+      );
+      for (const dim of oldDims) {
+        await connection.execute(
+          "DELETE FROM dimension_questions WHERE dimension_id = ?",
+          [dim.id],
+        );
+      }
+      await connection.execute(
+        "DELETE FROM dimensions WHERE questionnaire_id = ?",
+        [questionnaireId],
+      );
+
+      // 插入新维度配置
+      for (const dim of dimensions) {
+        const [result] = await connection.execute(
+          "INSERT INTO dimensions (questionnaire_id, name, description, score_formula) VALUES (?, ?, ?, ?)",
+          [
+            questionnaireId,
+            dim.name,
+            dim.description || "",
+            dim.score_formula || "sum",
+          ],
+        );
+        const dimensionId = result.insertId;
+        for (const qid of dim.question_ids || []) {
+          await connection.execute(
+            "INSERT INTO dimension_questions (dimension_id, question_id) VALUES (?, ?)",
+            [dimensionId, qid],
+          );
+        }
+      }
+
+      await connection.end();
+      res.json({ success: true, message: "维度配置保存成功" });
+    } catch (err) {
+      await connection.end();
+      console.error("保存维度配置失败:", err);
+      res.status(500).json({ success: false, message: "服务器错误" });
+    }
+  },
+);
+
+// 计算某次提交的得分（按维度）
+app.get("/api/submissions/:id/score", verifyAdminToken, async (req, res) => {
+  const submissionId = req.params.id;
+  try {
+    const connection = await mysql.createConnection(dbConfig);
+
+    // 获取这次提交对应的问卷id
+    const [subRows] = await connection.execute(
+      "SELECT * FROM submissions WHERE id = ?",
+      [submissionId],
+    );
+    if (subRows.length === 0) {
+      await connection.end();
+      return res
+        .status(404)
+        .json({ success: false, message: "提交记录不存在" });
+    }
+    const questionnaireId = subRows[0].questionnaire_id;
+
+    // 获取这次提交的所有作答
+    const [answers] = await connection.execute(
+      "SELECT * FROM answers WHERE submission_id = ?",
+      [submissionId],
+    );
+
+    // 获取所有题目信息（为了知道反向计分和分值范围）
+    const [questions] = await connection.execute(
+      "SELECT * FROM questions WHERE questionnaire_id = ?",
+      [questionnaireId],
+    );
+    const questionMap = {};
+    questions.forEach((q) => {
+      questionMap[q.id] = q;
+    });
+
+    // 第一步：处理反向计分，得到每道题的实际得分
+    const scoredAnswers = {};
+    answers.forEach((ans) => {
+      const q = questionMap[ans.question_id];
+      if (!q) return;
+      let score = ans.answer_value;
+      if (q.is_reverse_scored) {
+        // 反向计分公式：最高分 + 最低分 - 原始分
+        score = q.max_score + q.min_score - ans.answer_value;
+      }
+      scoredAnswers[ans.question_id] = score;
+    });
+
+    // 第二步：获取维度配置，按维度汇总得分
+    const [dimensions] = await connection.execute(
+      "SELECT * FROM dimensions WHERE questionnaire_id = ?",
+      [questionnaireId],
+    );
+
+    const dimensionScores = [];
+    let totalScore = 0;
+
+    for (const dim of dimensions) {
+      const [dimQuestions] = await connection.execute(
+        "SELECT question_id FROM dimension_questions WHERE dimension_id = ?",
+        [dim.id],
+      );
+      const scores = dimQuestions
+        .map((dq) => scoredAnswers[dq.question_id])
+        .filter((s) => s !== undefined);
+
+      let dimScore = 0;
+      if (scores.length > 0) {
+        if (dim.score_formula === "mean") {
+          dimScore = scores.reduce((a, b) => a + b, 0) / scores.length;
+          dimScore = Math.round(dimScore * 100) / 100; // 保留两位小数
+        } else {
+          dimScore = scores.reduce((a, b) => a + b, 0);
+        }
+      }
+
+      totalScore += dim.score_formula === "mean" ? dimScore : dimScore;
+      dimensionScores.push({
+        dimension_name: dim.name,
+        score_formula: dim.score_formula,
+        question_count: scores.length,
+        score: dimScore,
+      });
+    }
+
+    await connection.end();
+    res.json({
+      success: true,
+      submission_id: submissionId,
+      total_score: totalScore,
+      dimension_scores: dimensionScores,
+    });
+  } catch (err) {
+    console.error("计算得分失败:", err);
+    res.status(500).json({ success: false, message: "服务器错误" });
+  }
+});
 
 app.listen(PORT, () => {
   console.log(`后端服务已启动，访问 http://localhost:${PORT}`);
