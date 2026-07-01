@@ -10,6 +10,7 @@ const answersMap = ref({});
 const submitted = ref(false);
 const consented = ref(false);
 const loading = ref(true);
+const closedMessage = ref(""); // 问卷关闭时的提示信息
 const overallStartTime = ref(null);
 const currentIndex = ref(0);
 
@@ -42,16 +43,12 @@ onMounted(async () => {
       questionnaire.value = data.questionnaire;
       questions.value = data.questions;
       overallStartTime.value = Date.now();
-
-      // 初始化每道题的累计用时为0
-      data.questions.forEach((q) => {
-        questionDurations.value[q.id] = 0;
-      });
-
-      // 开始对第一道题计时
       if (data.questions.length > 0) {
+        questionDurations.value[data.questions[0].id] = 0;
         currentQuestionStartTime.value = Date.now();
       }
+    } else if (data.closed) {
+      closedMessage.value = data.message;
     }
   } catch (err) {
     console.error("获取问卷失败:", err);
@@ -171,6 +168,28 @@ async function submitQuestionnaire() {
 
     <div class="content" v-loading="loading">
       <div v-if="loading" class="loading">正在加载问卷...</div>
+
+      <div v-else-if="closedMessage" class="closed-card">
+        <div class="closed-icon">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none">
+            <circle
+              cx="12"
+              cy="12"
+              r="10"
+              stroke="#8AAA94"
+              stroke-width="1.5"
+            />
+            <path
+              d="M8 12h8"
+              stroke="#8AAA94"
+              stroke-width="1.8"
+              stroke-linecap="round"
+            />
+          </svg>
+        </div>
+        <h2>{{ closedMessage }}</h2>
+        <p class="closed-sub">本次调研已结束，期待您下次参与。</p>
+      </div>
 
       <div v-else-if="!questionnaire" class="error-state">
         问卷加载失败，请检查后端服务
@@ -548,5 +567,27 @@ async function submitQuestionnaire() {
 }
 .consent-btn:hover {
   opacity: 0.9;
+}
+
+.closed-card {
+  background: rgba(255, 255, 255, 0.92);
+  border-radius: 20px;
+  padding: 48px 32px;
+  text-align: center;
+  box-shadow: 0 16px 40px rgba(76, 175, 125, 0.12);
+}
+.closed-icon {
+  margin-bottom: 16px;
+}
+.closed-card h2 {
+  font-size: 17px;
+  color: #5a7a64;
+  margin: 0 0 8px;
+  font-weight: 500;
+}
+.closed-sub {
+  font-size: 13px;
+  color: #8aaa94;
+  margin: 0;
 }
 </style>

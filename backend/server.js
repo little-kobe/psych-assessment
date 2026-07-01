@@ -81,6 +81,47 @@ app.get("/api/questionnaire/:id", async (req, res) => {
       return res.status(404).json({ success: false, message: "问卷不存在" });
     }
 
+    const questionnaire = questionnaireRows[0];
+
+    // 检查问卷是否已关闭
+    if (!questionnaire.is_active) {
+      await connection.end();
+      return res.status(403).json({
+        success: false,
+        closed: true,
+        message: "问卷已关闭，感谢您的关注",
+      });
+    }
+
+    // 检查是否已过截止时间
+    if (
+      questionnaire.expires_at &&
+      new Date() > new Date(questionnaire.expires_at)
+    ) {
+      await connection.end();
+      return res.status(403).json({
+        success: false,
+        closed: true,
+        message: "问卷已过截止时间，感谢您的关注",
+      });
+    }
+
+    // 检查是否已达到最大回收数量
+    if (questionnaire.max_responses) {
+      const [countRows] = await connection.execute(
+        "SELECT COUNT(*) AS total FROM submissions WHERE questionnaire_id = ?",
+        [questionnaireId],
+      );
+      if (countRows[0].total >= questionnaire.max_responses) {
+        await connection.end();
+        return res.status(403).json({
+          success: false,
+          closed: true,
+          message: "问卷已达到最大回收数量，感谢您的参与",
+        });
+      }
+    }
+
     const [questionRows] = await connection.execute(
       "SELECT * FROM questions WHERE questionnaire_id = ? ORDER BY order_num ASC",
       [questionnaireId],
@@ -90,7 +131,7 @@ app.get("/api/questionnaire/:id", async (req, res) => {
 
     res.json({
       success: true,
-      questionnaire: questionnaireRows[0],
+      questionnaire,
       questions: questionRows,
     });
   } catch (err) {
@@ -437,7 +478,6 @@ app.get(
     try {
       const connection = await mysql.createConnection(dbConfig);
 
-      // 权限检查
       const [qRows] = await connection.execute(
         "SELECT * FROM questionnaires WHERE id = ?",
         [questionnaireId],
@@ -457,19 +497,36 @@ app.get(
           .json({ success: false, message: "没有权限导出此问卷数据" });
       }
 
-      // 获取题目列表（按顺序）
+      // 获取题目
       const [questions] = await connection.execute(
         "SELECT * FROM questions WHERE questionnaire_id = ? ORDER BY order_num ASC",
         [questionnaireId],
       );
+      const questionMap = {};
+      questions.forEach((q) => {
+        questionMap[q.id] = q;
+      });
 
-      // 获取所有提交记录
+      // 获取维度配置
+      const [dimensions] = await connection.execute(
+        "SELECT * FROM dimensions WHERE questionnaire_id = ?",
+        [questionnaireId],
+      );
+      for (const dim of dimensions) {
+        const [dqs] = await connection.execute(
+          "SELECT question_id FROM dimension_questions WHERE dimension_id = ?",
+          [dim.id],
+        );
+        dim.question_ids = dqs.map((d) => d.question_id);
+      }
+
+      // 获取提交记录
       const [submissions] = await connection.execute(
         "SELECT * FROM submissions WHERE questionnaire_id = ? ORDER BY started_at ASC",
         [questionnaireId],
       );
 
-      // 获取所有作答记录
+      // 获取所有答案
       const [answers] = await connection.execute(
         `SELECT a.* FROM answers a
        INNER JOIN submissions s ON a.submission_id = s.id
@@ -479,30 +536,42 @@ app.get(
 
       await connection.end();
 
-      // 把answers按submission_id分组，方便后面按行组装
+      // 按submission_id分组答案
       const answerMap = {};
       answers.forEach((ans) => {
         if (!answerMap[ans.submission_id]) answerMap[ans.submission_id] = {};
         answerMap[ans.submission_id][ans.question_id] = ans;
       });
 
-      // 用exceljs创建工作簿
+      // 创建Excel
       const workbook = new ExcelJS.Workbook();
       const sheet = workbook.addWorksheet("作答数据");
 
-      // 构建表头：固定列 + 每道题一列
+      // 构建表头
       const fixedHeaders = ["提交ID", "开始时间", "完成时间", "总用时(秒)"];
-      const questionHeaders = questions.map((q) => `第${q.order_num}题`);
-      const timingHeaders = questions.map((q) => `第${q.order_num}题用时(秒)`);
+      const questionScoreHeaders = questions.map(
+        (q) => `第${q.order_num}题原始分`,
+      );
+      const questionTimeHeaders = questions.map(
+        (q) => `第${q.order_num}题用时(秒)`,
+      );
+      const dimensionHeaders = dimensions.map(
+        (d) => `${d.name}(${d.score_formula === "mean" ? "均值" : "求和"})`,
+      );
+      const totalHeader = dimensions.length > 0 ? ["总分"] : [];
+
       const allHeaders = [
         ...fixedHeaders,
-        ...questionHeaders,
-        ...timingHeaders,
+        ...questionScoreHeaders,
+        ...questionTimeHeaders,
+        ...(dimensions.length > 0 ? ["--- 计分结果 ---"] : []),
+        ...dimensionHeaders,
+        ...totalHeader,
       ];
 
       sheet.addRow(allHeaders);
 
-      // 表头行加粗、背景色
+      // 表头样式
       const headerRow = sheet.getRow(1);
       headerRow.font = { bold: true };
       headerRow.fill = {
@@ -511,8 +580,26 @@ app.get(
         fgColor: { argb: "FFE8F5E9" },
       };
 
-      // 每行填一条提交记录
+      // 如果有维度，给计分结果那几列加不同背景色
+      if (dimensions.length > 0) {
+        const scoreStartCol =
+          fixedHeaders.length +
+          questionScoreHeaders.length +
+          questionTimeHeaders.length +
+          2;
+        for (let c = scoreStartCol; c <= allHeaders.length; c++) {
+          const cell = headerRow.getCell(c);
+          cell.fill = {
+            type: "pattern",
+            pattern: "solid",
+            fgColor: { argb: "FFFFF3CD" },
+          };
+        }
+      }
+
+      // 填数据行
       submissions.forEach((sub) => {
+        const subAnswers = answerMap[sub.id] || {};
         const totalSeconds =
           sub.started_at && sub.finished_at
             ? Math.round(
@@ -520,6 +607,7 @@ app.get(
               )
             : "";
 
+        // 固定列
         const fixedCols = [
           sub.id,
           sub.started_at
@@ -531,29 +619,91 @@ app.get(
           totalSeconds,
         ];
 
-        // 每道题的作答分数
-        const scoreCols = questions.map((q) => {
-          const ans = answerMap[sub.id]?.[q.id];
+        // 每题原始分
+        const rawScores = questions.map((q) => {
+          const ans = subAnswers[q.id];
           return ans ? ans.answer_value : "";
         });
 
-        // 每道题的作答用时（毫秒转秒）
-        const timingCols = questions.map((q) => {
-          const ans = answerMap[sub.id]?.[q.id];
+        // 每题用时
+        const timings = questions.map((q) => {
+          const ans = subAnswers[q.id];
           return ans && ans.duration_ms
             ? Math.round(ans.duration_ms / 1000)
             : "";
         });
 
-        sheet.addRow([...fixedCols, ...scoreCols, ...timingCols]);
+        // 计分结果
+        let dimensionScoreCols = [];
+        let totalScore = "";
+
+        if (dimensions.length > 0) {
+          // 先处理反向计分
+          const scoredAnswers = {};
+          Object.values(subAnswers).forEach((ans) => {
+            const q = questionMap[ans.question_id];
+            if (!q) return;
+            let score = ans.answer_value;
+            if (q.is_reverse_scored) {
+              score = q.max_score + q.min_score - ans.answer_value;
+            }
+            scoredAnswers[ans.question_id] = score;
+          });
+
+          // 按维度汇总
+          let total = 0;
+          dimensionScoreCols = dimensions.map((dim) => {
+            const scores = dim.question_ids
+              .map((qid) => scoredAnswers[qid])
+              .filter((s) => s !== undefined);
+            if (scores.length === 0) return "";
+            let dimScore;
+            if (dim.score_formula === "mean") {
+              dimScore =
+                Math.round(
+                  (scores.reduce((a, b) => a + b, 0) / scores.length) * 100,
+                ) / 100;
+            } else {
+              dimScore = scores.reduce((a, b) => a + b, 0);
+            }
+            total += dimScore;
+            return dimScore;
+          });
+          totalScore = Math.round(total * 100) / 100;
+        }
+
+        const row = [
+          ...fixedCols,
+          ...rawScores,
+          ...timings,
+          ...(dimensions.length > 0 ? [""] : []),
+          ...dimensionScoreCols,
+          ...(dimensions.length > 0 ? [totalScore] : []),
+        ];
+
+        const dataRow = sheet.addRow(row);
+
+        // 计分结果列加黄色背景
+        if (dimensions.length > 0) {
+          const scoreStartCol =
+            fixedHeaders.length + rawScores.length + timings.length + 2;
+          for (let c = scoreStartCol; c <= row.length; c++) {
+            dataRow.getCell(c).fill = {
+              type: "pattern",
+              pattern: "solid",
+              fgColor: { argb: "FFFFFBF0" },
+            };
+          }
+        }
       });
 
       // 设置列宽
       sheet.columns.forEach((col, index) => {
-        col.width = index < 4 ? 18 : 12;
+        if (index < 4) col.width = 18;
+        else if (index < 4 + questions.length * 2) col.width = 14;
+        else col.width = 16;
       });
 
-      // 设置响应头，让浏览器触发下载
       const filename = encodeURIComponent(
         `${questionnaire.title}_作答数据.xlsx`,
       );
@@ -578,7 +728,15 @@ app.get(
 // 编辑问卷基本信息
 app.put("/api/questionnaires/:id", verifyAdminToken, async (req, res) => {
   const questionnaireId = req.params.id;
-  const { title, description, consent_text, track_timing } = req.body;
+  const {
+    title,
+    description,
+    consent_text,
+    track_timing,
+    max_responses,
+    expires_at,
+    is_active,
+  } = req.body;
 
   if (!title) {
     return res
@@ -609,12 +767,15 @@ app.put("/api/questionnaires/:id", verifyAdminToken, async (req, res) => {
     }
 
     await connection.execute(
-      "UPDATE questionnaires SET title = ?, description = ?, consent_text = ?, track_timing = ? WHERE id = ?",
+      "UPDATE questionnaires SET title = ?, description = ?, consent_text = ?, track_timing = ?, max_responses = ?, expires_at = ?, is_active = ? WHERE id = ?",
       [
         title,
         description || "",
         consent_text || "",
         track_timing !== false,
+        max_responses || null,
+        expires_at || null,
+        is_active !== false,
         questionnaireId,
       ],
     );
@@ -977,6 +1138,123 @@ app.get("/api/submissions/:id/score", verifyAdminToken, async (req, res) => {
     });
   } catch (err) {
     console.error("计算得分失败:", err);
+    res.status(500).json({ success: false, message: "服务器错误" });
+  }
+});
+
+// 获取所有研究者账号列表（仅导师可用）
+app.get("/api/admins", verifyAdminToken, async (req, res) => {
+  if (req.admin.role !== "supervisor") {
+    return res
+      .status(403)
+      .json({ success: false, message: "仅导师账号可以管理研究者" });
+  }
+  try {
+    const connection = await mysql.createConnection(dbConfig);
+    const [rows] = await connection.execute(
+      "SELECT id, username, display_name, role, created_at FROM admins ORDER BY created_at ASC",
+    );
+    await connection.end();
+    res.json({ success: true, admins: rows });
+  } catch (err) {
+    console.error("获取账号列表失败:", err);
+    res.status(500).json({ success: false, message: "服务器错误" });
+  }
+});
+
+// 新建研究者账号（仅导师可用）
+app.post("/api/admins", verifyAdminToken, async (req, res) => {
+  if (req.admin.role !== "supervisor") {
+    return res
+      .status(403)
+      .json({ success: false, message: "仅导师账号可以新建研究者" });
+  }
+  const { username, password, display_name, role } = req.body;
+  if (!username || !password || !display_name) {
+    return res
+      .status(400)
+      .json({ success: false, message: "账号、密码、姓名不能为空" });
+  }
+  if (password.length < 6) {
+    return res.status(400).json({ success: false, message: "密码不能少于6位" });
+  }
+  try {
+    const connection = await mysql.createConnection(dbConfig);
+
+    // 检查账号是否已存在
+    const [existing] = await connection.execute(
+      "SELECT id FROM admins WHERE username = ?",
+      [username],
+    );
+    if (existing.length > 0) {
+      await connection.end();
+      return res
+        .status(400)
+        .json({ success: false, message: "账号名已存在，请换一个" });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    await connection.execute(
+      "INSERT INTO admins (username, password_hash, display_name, role) VALUES (?, ?, ?, ?)",
+      [username, passwordHash, display_name, role || "researcher"],
+    );
+    await connection.end();
+    res.json({ success: true, message: "账号创建成功" });
+  } catch (err) {
+    console.error("创建账号失败:", err);
+    res.status(500).json({ success: false, message: "服务器错误" });
+  }
+});
+
+// 重置某个账号的密码（仅导师可用）
+app.put("/api/admins/:id/password", verifyAdminToken, async (req, res) => {
+  if (req.admin.role !== "supervisor") {
+    return res
+      .status(403)
+      .json({ success: false, message: "仅导师账号可以重置密码" });
+  }
+  const { new_password } = req.body;
+  if (!new_password || new_password.length < 6) {
+    return res
+      .status(400)
+      .json({ success: false, message: "新密码不能少于6位" });
+  }
+  try {
+    const connection = await mysql.createConnection(dbConfig);
+    const passwordHash = await bcrypt.hash(new_password, 10);
+    await connection.execute(
+      "UPDATE admins SET password_hash = ? WHERE id = ?",
+      [passwordHash, req.params.id],
+    );
+    await connection.end();
+    res.json({ success: true, message: "密码重置成功" });
+  } catch (err) {
+    console.error("重置密码失败:", err);
+    res.status(500).json({ success: false, message: "服务器错误" });
+  }
+});
+
+// 删除研究者账号（仅导师可用，不能删自己）
+app.delete("/api/admins/:id", verifyAdminToken, async (req, res) => {
+  if (req.admin.role !== "supervisor") {
+    return res
+      .status(403)
+      .json({ success: false, message: "仅导师账号可以删除研究者" });
+  }
+  if (Number(req.params.id) === req.admin.adminId) {
+    return res
+      .status(400)
+      .json({ success: false, message: "不能删除自己的账号" });
+  }
+  try {
+    const connection = await mysql.createConnection(dbConfig);
+    await connection.execute("DELETE FROM admins WHERE id = ?", [
+      req.params.id,
+    ]);
+    await connection.end();
+    res.json({ success: true, message: "账号已删除" });
+  } catch (err) {
+    console.error("删除账号失败:", err);
     res.status(500).json({ success: false, message: "服务器错误" });
   }
 });

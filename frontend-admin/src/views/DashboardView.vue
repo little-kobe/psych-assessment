@@ -15,6 +15,9 @@ const newQuestionnaire = ref({
   description: "",
   consent_text: "",
   track_timing: true,
+  is_active: true,
+  max_responses: null,
+  expires_at: null,
 });
 
 async function fetchQuestionnaires() {
@@ -107,21 +110,18 @@ const roleLabel = () => (role.value === "supervisor" ? "导师" : "研究者");
         <span>测评管理平台</span>
       </div>
       <el-menu
-        default-active="1"
+        :default-active="$route.path"
         class="menu"
         background-color="transparent"
         text-color="#5a4a2e"
         active-text-color="#F4844C"
+        router
       >
-        <el-menu-item index="1">
-          <el-icon><i class="el-icon-document"></i></el-icon>
+        <el-menu-item index="/">
           <span>问卷管理</span>
         </el-menu-item>
-        <el-menu-item index="2">
-          <span>导入题目</span>
-        </el-menu-item>
-        <el-menu-item index="3">
-          <span>数据导出</span>
+        <el-menu-item v-if="role === 'supervisor'" index="/admin-manage">
+          <span>账号管理</span>
         </el-menu-item>
       </el-menu>
     </el-aside>

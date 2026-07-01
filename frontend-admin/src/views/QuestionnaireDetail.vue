@@ -82,6 +82,9 @@ function openEditDialog() {
     description: questionnaire.value.description || "",
     consent_text: questionnaire.value.consent_text || "",
     track_timing: !!questionnaire.value.track_timing,
+    is_active: questionnaire.value.is_active !== false,
+    max_responses: questionnaire.value.max_responses || null,
+    expires_at: questionnaire.value.expires_at || null,
   };
   showEditDialog.value = true;
 }
@@ -339,6 +342,37 @@ onMounted(fetchDetail);
         </el-form-item>
         <el-form-item label="记录时长">
           <el-switch v-model="editForm.track_timing" />
+        </el-form-item>
+        <el-divider>回收控制</el-divider>
+        <el-form-item label="问卷状态">
+          <el-switch
+            v-model="editForm.is_active"
+            active-text="开放填写"
+            inactive-text="已关闭"
+          />
+        </el-form-item>
+        <el-form-item label="最大回收数">
+          <el-input-number
+            v-model="editForm.max_responses"
+            :min="1"
+            :max="99999"
+            placeholder="不填表示不限制"
+            controls-position="right"
+            style="width: 180px"
+          />
+          <span style="margin-left: 8px; font-size: 12px; color: #999"
+            >份，不填表示不限制</span
+          >
+        </el-form-item>
+        <el-form-item label="截止时间">
+          <el-date-picker
+            v-model="editForm.expires_at"
+            type="datetime"
+            placeholder="不选表示不限制"
+            format="YYYY-MM-DD HH:mm"
+            value-format="YYYY-MM-DD HH:mm:ss"
+            style="width: 220px"
+          />
         </el-form-item>
       </el-form>
       <template #footer>

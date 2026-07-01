@@ -4,6 +4,7 @@ import DashboardView from "../views/DashboardView.vue";
 import ImportQuestions from "../views/ImportQuestions.vue";
 import QuestionnaireDetail from "../views/QuestionnaireDetail.vue";
 import DimensionConfig from "../views/DimensionConfig.vue";
+import AdminManage from "../views/AdminManage.vue";
 
 const routes = [
   { path: "/login", name: "login", component: LoginView },
@@ -19,6 +20,7 @@ const routes = [
     name: "dimensionConfig",
     component: DimensionConfig,
   },
+  { path: "/admin-manage", name: "adminManage", component: AdminManage },
 ];
 
 const router = createRouter({
