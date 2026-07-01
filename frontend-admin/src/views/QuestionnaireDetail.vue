@@ -48,6 +48,8 @@ async function fetchDetail() {
   }
 }
 
+const hasDimensions = ref(false);
+
 async function fetchSubmissions() {
   submissionsLoading.value = true;
   const token = localStorage.getItem("admin_token");
@@ -59,6 +61,7 @@ async function fetchSubmissions() {
     const data = await response.json();
     if (data.success) {
       submissions.value = data.submissions;
+      hasDimensions.value = data.has_dimensions;
     }
   } catch (err) {
     console.error("获取提交记录失败:", err);
@@ -243,23 +246,18 @@ onMounted(fetchDetail);
 
           <div v-loading="submissionsLoading">
             <el-table :data="submissions" v-if="submissions.length > 0">
-              <el-table-column prop="id" label="编号" width="80" />
-              <el-table-column label="提交时间" width="180">
+              <el-table-column prop="id" label="编号" width="70" />
+              <el-table-column label="提交时间" width="170">
                 <template #default="scope">
                   {{ formatTime(scope.row.finished_at) }}
                 </template>
               </el-table-column>
-              <el-table-column label="总用时" width="110">
+              <el-table-column label="总用时" width="100">
                 <template #default="scope">
                   {{ formatDuration(scope.row.duration_seconds) }}
                 </template>
               </el-table-column>
-              <el-table-column label="作答题数" width="100">
-                <template #default="scope">
-                  {{ scope.row.answer_count }} / {{ questions.length }}
-                </template>
-              </el-table-column>
-              <el-table-column label="状态" width="90">
+              <el-table-column label="状态" width="80">
                 <template #default="scope">
                   <el-tag
                     :type="
@@ -277,6 +275,42 @@ onMounted(fetchDetail);
                   </el-tag>
                 </template>
               </el-table-column>
+
+              <!-- 有维度配置时显示总分和各维度得分 -->
+              <template v-if="hasDimensions">
+                <el-table-column label="总分" width="80">
+                  <template #default="scope">
+                    <span style="font-weight: 600; color: #3d2b12">
+                      {{ scope.row.total_score ?? "-" }}
+                    </span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="各维度得分" min-width="200">
+                  <template #default="scope">
+                    <div class="dim-scores">
+                      <el-tag
+                        v-for="ds in scope.row.dimension_scores"
+                        :key="ds.name"
+                        size="small"
+                        type="info"
+                        style="margin: 2px"
+                      >
+                        {{ ds.name }}：{{ ds.score }}
+                      </el-tag>
+                    </div>
+                  </template>
+                </el-table-column>
+              </template>
+
+              <template v-else>
+                <el-table-column label="得分" width="180">
+                  <template #default>
+                    <span style="color: #aaa; font-size: 12px"
+                      >请先配置维度计分规则</span
+                    >
+                  </template>
+                </el-table-column>
+              </template>
             </el-table>
             <el-empty
               v-else-if="!submissionsLoading"
@@ -349,5 +383,11 @@ onMounted(fetchDetail);
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.dim-scores {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
 }
 </style>

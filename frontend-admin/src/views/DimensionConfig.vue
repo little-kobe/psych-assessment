@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from "vue";
+import { ref, onMounted, computed } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 
@@ -11,11 +11,20 @@ const questions = ref([]);
 const dimensions = ref([]);
 const loading = ref(true);
 const saving = ref(false);
+const searchKeyword = ref("");
+
+const filteredQuestions = computed(() => {
+  if (!searchKeyword.value) return questions.value;
+  return questions.value.filter(
+    (q) =>
+      q.content.includes(searchKeyword.value) ||
+      String(q.order_num).includes(searchKeyword.value),
+  );
+});
 
 async function fetchData() {
   const token = localStorage.getItem("admin_token");
   try {
-    // 获取题目列表
     const qRes = await fetch(
       `http://localhost:3000/api/questionnaires/${questionnaireId}`,
       {
@@ -25,7 +34,6 @@ async function fetchData() {
     const qData = await qRes.json();
     if (qData.success) questions.value = qData.questions;
 
-    // 获取现有维度配置
     const dRes = await fetch(
       `http://localhost:3000/api/questionnaires/${questionnaireId}/dimensions`,
       {
@@ -61,8 +69,41 @@ function removeDimension(index) {
   dimensions.value.splice(index, 1);
 }
 
+// 全选：把当前搜索结果里所有题目都加进这个维度
+function selectAll(dim) {
+  const filtered = filteredQuestions.value.map((q) => q.id);
+  const existing = new Set(dim.question_ids);
+  filtered.forEach((id) => existing.add(id));
+  dim.question_ids = Array.from(existing);
+}
+
+// 全不选：把当前搜索结果里的题目从这个维度里移除
+function selectNone(dim) {
+  const filtered = new Set(filteredQuestions.value.map((q) => q.id));
+  dim.question_ids = dim.question_ids.filter((id) => !filtered.has(id));
+}
+
+// 反选：搜索结果里已选的取消、未选的添加
+function invertSelection(dim) {
+  const filtered = filteredQuestions.value.map((q) => q.id);
+  const selected = new Set(dim.question_ids);
+  filtered.forEach((id) => {
+    if (selected.has(id)) {
+      selected.delete(id);
+    } else {
+      selected.add(id);
+    }
+  });
+  dim.question_ids = Array.from(selected);
+}
+
+// 某个维度的已选数量（基于当前搜索结果）
+function selectedCount(dim) {
+  const filtered = new Set(filteredQuestions.value.map((q) => q.id));
+  return dim.question_ids.filter((id) => filtered.has(id)).length;
+}
+
 async function saveDimensions() {
-  // 验证每个维度都有名称
   for (const dim of dimensions.value) {
     if (!dim.name) {
       ElMessage.warning("维度名称不能为空");
@@ -128,8 +169,22 @@ onMounted(fetchData);
       :closable="false"
       show-icon
       style="margin-bottom: 20px"
-      description="为每个维度选择对应的题目，系统会自动处理反向计分并按选择的公式计算维度得分。反向计分在题目导入时已标记，无需在这里重复设置。"
+      description="为每个维度选择对应的题目，系统会自动处理反向计分并按选择的公式计算维度得分。可以用搜索框快速筛选题目，再用全选/反选批量操作。"
     />
+
+    <!-- 全局题目搜索框 -->
+    <div class="search-bar">
+      <el-input
+        v-model="searchKeyword"
+        placeholder="搜索题目内容或题号，快速定位"
+        clearable
+        prefix-icon="Search"
+        style="max-width: 360px"
+      />
+      <span class="search-hint">
+        显示 {{ filteredQuestions.length }} / {{ questions.length }} 道题
+      </span>
+    </div>
 
     <div v-if="dimensions.length === 0" style="margin: 40px 0">
       <el-empty description="还没有配置维度，点击右上角「添加维度」开始配置">
@@ -167,23 +222,51 @@ onMounted(fetchData);
             </el-radio-group>
           </el-form-item>
           <el-form-item label="包含题目">
+            <!-- 批量操作工具栏 -->
+            <div class="batch-toolbar">
+              <span class="selected-hint">
+                已选 {{ selectedCount(dim) }} /
+                {{ filteredQuestions.length }} 道
+                <template
+                  v-if="dim.question_ids.length > filteredQuestions.length"
+                >
+                  （含搜索范围外
+                  {{ dim.question_ids.length - selectedCount(dim) }} 道）
+                </template>
+              </span>
+              <div class="batch-btns">
+                <el-button size="small" @click="selectAll(dim)">全选</el-button>
+                <el-button size="small" @click="selectNone(dim)"
+                  >全不选</el-button
+                >
+                <el-button size="small" @click="invertSelection(dim)"
+                  >反选</el-button
+                >
+              </div>
+            </div>
+
             <el-checkbox-group v-model="dim.question_ids">
               <div class="question-list">
                 <el-checkbox
-                  v-for="q in questions"
+                  v-for="q in filteredQuestions"
                   :key="q.id"
                   :value="q.id"
                   class="question-item"
                 >
-                  第{{ q.order_num }}题：{{ q.content }}
+                  <span class="q-num">第{{ q.order_num }}题</span>
+                  <span class="q-content">{{ q.content }}</span>
                   <el-tag
                     v-if="q.is_reverse_scored"
                     type="warning"
                     size="small"
-                    style="margin-left: 6px"
+                    style="margin-left: 6px; flex-shrink: 0"
                     >反向</el-tag
                   >
                 </el-checkbox>
+
+                <div v-if="filteredQuestions.length === 0" class="no-result">
+                  没有匹配的题目
+                </div>
               </div>
             </el-checkbox-group>
           </el-form-item>
@@ -210,6 +293,16 @@ onMounted(fetchData);
   font-size: 20px;
   color: #3d2b12;
 }
+.search-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.search-hint {
+  font-size: 13px;
+  color: #999;
+}
 .dimensions-list {
   display: flex;
   flex-direction: column;
@@ -229,21 +322,59 @@ onMounted(fetchData);
   color: #8b5a2b;
   font-size: 14px;
 }
+.batch-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  padding: 6px 10px;
+  background: #fff8e7;
+  border-radius: 6px;
+  border: 1px solid #f0dcae;
+}
+.selected-hint {
+  font-size: 13px;
+  color: #8b5a2b;
+}
+.batch-btns {
+  display: flex;
+  gap: 6px;
+}
 .question-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  max-height: 280px;
+  gap: 6px;
+  max-height: 320px;
   overflow-y: auto;
-  padding: 8px;
+  padding: 10px;
   background: #fafafa;
   border-radius: 6px;
   border: 1px solid #eeeeee;
+  width: 100%;
 }
 .question-item {
+  display: flex;
   align-items: flex-start;
-  line-height: 1.5;
-  white-space: normal;
   height: auto;
+  white-space: normal;
+  padding: 4px 0;
+}
+.q-num {
+  color: #8b5a2b;
+  font-size: 12px;
+  font-weight: 600;
+  min-width: 52px;
+  flex-shrink: 0;
+}
+.q-content {
+  font-size: 13px;
+  color: #3d2b12;
+  line-height: 1.5;
+}
+.no-result {
+  text-align: center;
+  color: #aaa;
+  font-size: 13px;
+  padding: 20px 0;
 }
 </style>

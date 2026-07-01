@@ -637,7 +637,6 @@ app.get(
     try {
       const connection = await mysql.createConnection(dbConfig);
 
-      // 权限检查
       const [qRows] = await connection.execute(
         "SELECT * FROM questionnaires WHERE id = ?",
         [questionnaireId],
@@ -656,7 +655,30 @@ app.get(
           .json({ success: false, message: "没有权限查看此问卷数据" });
       }
 
-      // 查提交记录，同时统计每条提交的答题数量
+      // 获取题目信息（用于反向计分）
+      const [questions] = await connection.execute(
+        "SELECT * FROM questions WHERE questionnaire_id = ?",
+        [questionnaireId],
+      );
+      const questionMap = {};
+      questions.forEach((q) => {
+        questionMap[q.id] = q;
+      });
+
+      // 获取维度配置
+      const [dimensions] = await connection.execute(
+        "SELECT * FROM dimensions WHERE questionnaire_id = ?",
+        [questionnaireId],
+      );
+      for (const dim of dimensions) {
+        const [dqs] = await connection.execute(
+          "SELECT question_id FROM dimension_questions WHERE dimension_id = ?",
+          [dim.id],
+        );
+        dim.question_ids = dqs.map((d) => d.question_id);
+      }
+
+      // 获取所有提交记录
       const [submissions] = await connection.execute(
         `SELECT s.*,
         TIMESTAMPDIFF(SECOND, s.started_at, s.finished_at) AS duration_seconds,
@@ -669,8 +691,80 @@ app.get(
         [questionnaireId],
       );
 
+      // 获取所有答案
+      const [allAnswers] = await connection.execute(
+        `SELECT a.* FROM answers a
+       INNER JOIN submissions s ON a.submission_id = s.id
+       WHERE s.questionnaire_id = ?`,
+        [questionnaireId],
+      );
+
+      // 按submission_id分组答案
+      const answersBySubmission = {};
+      allAnswers.forEach((ans) => {
+        if (!answersBySubmission[ans.submission_id]) {
+          answersBySubmission[ans.submission_id] = {};
+        }
+        answersBySubmission[ans.submission_id][ans.question_id] = ans;
+      });
+
+      // 为每条提交记录计算维度得分
+      const submissionsWithScores = submissions.map((sub) => {
+        const answers = answersBySubmission[sub.id] || {};
+
+        // 处理反向计分
+        const scoredAnswers = {};
+        Object.values(answers).forEach((ans) => {
+          const q = questionMap[ans.question_id];
+          if (!q) return;
+          let score = ans.answer_value;
+          if (q.is_reverse_scored) {
+            score = q.max_score + q.min_score - ans.answer_value;
+          }
+          scoredAnswers[ans.question_id] = score;
+        });
+
+        // 按维度汇总
+        let totalScore = 0;
+        const dimensionScores = dimensions.map((dim) => {
+          const scores = dim.question_ids
+            .map((qid) => scoredAnswers[qid])
+            .filter((s) => s !== undefined);
+
+          let dimScore = 0;
+          if (scores.length > 0) {
+            if (dim.score_formula === "mean") {
+              dimScore =
+                Math.round(
+                  (scores.reduce((a, b) => a + b, 0) / scores.length) * 100,
+                ) / 100;
+            } else {
+              dimScore = scores.reduce((a, b) => a + b, 0);
+            }
+          }
+          totalScore += dimScore;
+
+          return {
+            name: dim.name,
+            score: dimScore,
+            formula: dim.score_formula,
+          };
+        });
+
+        return {
+          ...sub,
+          total_score: dimensions.length > 0 ? totalScore : null,
+          dimension_scores: dimensionScores,
+        };
+      });
+
       await connection.end();
-      res.json({ success: true, submissions, total: submissions.length });
+      res.json({
+        success: true,
+        submissions: submissionsWithScores,
+        total: submissionsWithScores.length,
+        has_dimensions: dimensions.length > 0,
+      });
     } catch (err) {
       console.error("获取提交记录失败:", err);
       res.status(500).json({ success: false, message: "服务器错误" });
