@@ -29,8 +29,10 @@ async function uploadFile() {
   formData.append("questionnaire_id", questionnaireId.value);
 
   try {
+    const token = localStorage.getItem("admin_token");
     const response = await fetch("http://localhost:3000/api/questions/import", {
       method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
       body: formData,
     });
     const data = await response.json();

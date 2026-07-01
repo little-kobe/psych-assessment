@@ -1,6 +1,7 @@
 <script setup>
 import { ref, onMounted } from "vue";
 import { useRouter } from "vue-router";
+import { ElMessage } from "element-plus";
 
 const router = useRouter();
 const displayName = ref("");
@@ -12,6 +13,7 @@ const showCreateDialog = ref(false);
 const newQuestionnaire = ref({
   title: "",
   description: "",
+  consent_text: "",
   track_timing: true,
 });
 
@@ -57,6 +59,19 @@ async function createQuestionnaire() {
   } catch (err) {
     console.error("创建问卷失败:", err);
   }
+}
+
+function copyLink(questionnaireId) {
+  // 用户端地址，本地开发时是5173端口，部署后换成真实域名
+  const link = `http://localhost:5173/q/${questionnaireId}`;
+  navigator.clipboard
+    .writeText(link)
+    .then(() => {
+      ElMessage.success("链接已复制，可直接发给受测者");
+    })
+    .catch(() => {
+      ElMessage.error("复制失败，请手动复制：" + link);
+    });
 }
 
 function goImport(questionnaireId) {
@@ -158,11 +173,27 @@ const roleLabel = () => (role.value === "supervisor" ? "导师" : "研究者");
               </el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="160">
+          <el-table-column label="操作" width="280">
             <template #default="scope">
-              <el-button size="small" @click="goImport(scope.row.id)"
-                >导入题目</el-button
-              >
+              <div class="action-btns">
+                <el-button
+                  size="small"
+                  type="primary"
+                  plain
+                  @click="$router.push(`/questionnaire/${scope.row.id}`)"
+                  >详情</el-button
+                >
+                <el-button
+                  size="small"
+                  type="success"
+                  plain
+                  @click="copyLink(scope.row.id)"
+                  >复制链接</el-button
+                >
+                <el-button size="small" @click="goImport(scope.row.id)"
+                  >导入题目</el-button
+                >
+              </div>
             </template>
           </el-table-column>
         </el-table>
@@ -180,6 +211,15 @@ const roleLabel = () => (role.value === "supervisor" ? "导师" : "研究者");
                 v-model="newQuestionnaire.description"
                 type="textarea"
                 :rows="2"
+                placeholder="简要说明本问卷的用途"
+              />
+            </el-form-item>
+            <el-form-item label="知情同意">
+              <el-input
+                v-model="newQuestionnaire.consent_text"
+                type="textarea"
+                :rows="4"
+                placeholder="填写受测者答题前需阅读的知情同意说明，例如：本问卷用于学术研究，所有数据匿名保存，参与完全自愿..."
               />
             </el-form-item>
             <el-form-item label="记录时长">
@@ -199,6 +239,12 @@ const roleLabel = () => (role.value === "supervisor" ? "导师" : "研究者");
 </template>
 
 <style scoped>
+.action-btns {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 6px;
+  align-items: center;
+}
 .layout {
   height: 100vh;
 }
@@ -246,5 +292,19 @@ const roleLabel = () => (role.value === "supervisor" ? "导师" : "研究者");
 }
 .main {
   background: #fafafa;
+  padding: 24px;
+}
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid #f0dcae;
+}
+.toolbar h2 {
+  margin: 0;
+  font-size: 18px;
+  color: #3d2b12;
 }
 </style>

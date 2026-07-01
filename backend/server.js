@@ -132,89 +132,100 @@ app.post("/api/submission", async (req, res) => {
 });
 
 // 批量导入题目接口
-app.post("/api/questions/import", upload.single("file"), async (req, res) => {
-  const questionnaireId = req.body.questionnaire_id;
+app.post(
+  "/api/questions/import",
+  verifyAdminToken,
+  upload.single("file"),
+  async (req, res) => {
+    const questionnaireId = req.body.questionnaire_id;
 
-  if (!req.file) {
-    return res.status(400).json({ success: false, message: "未收到文件" });
-  }
-  if (!questionnaireId) {
-    return res
-      .status(400)
-      .json({ success: false, message: "缺少questionnaire_id参数" });
-  }
-
-  try {
-    const workbook = XLSX.read(req.file.buffer, { type: "buffer" });
-    const sheetName = workbook.SheetNames[0];
-    const sheet = workbook.Sheets[sheetName];
-    const rows = XLSX.utils.sheet_to_json(sheet);
-
-    if (rows.length === 0) {
-      return res.status(400).json({ success: false, message: "Excel文件为空" });
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: "未收到文件" });
     }
-    const requiredColumns = [
-      "题号",
-      "题目内容",
-      "最低分",
-      "最高分",
-      "是否反向计分",
-    ];
-    const firstRowKeys = Object.keys(rows[0]);
-    const missingColumns = requiredColumns.filter(
-      (col) => !firstRowKeys.includes(col),
-    );
-    if (missingColumns.length > 0) {
-      return res.status(400).json({
-        success: false,
-        message: `Excel缺少必要列：${missingColumns.join("、")}`,
-      });
+    if (!questionnaireId) {
+      return res
+        .status(400)
+        .json({ success: false, message: "缺少questionnaire_id参数" });
     }
 
-    const connection = await mysql.createConnection(dbConfig);
+    try {
+      const workbook = XLSX.read(req.file.buffer, { type: "buffer" });
+      const sheetName = workbook.SheetNames[0];
+      const sheet = workbook.Sheets[sheetName];
+      const rows = XLSX.utils.sheet_to_json(sheet);
 
-    let successCount = 0;
-    const errors = [];
-
-    for (const row of rows) {
-      try {
-        const orderNum = row["题号"];
-        const content = row["题目内容"];
-        const minScore = row["最低分"];
-        const maxScore = row["最高分"];
-        const isReverse = row["是否反向计分"] === "是" ? 1 : 0;
-
-        if (!content || orderNum === undefined) {
-          errors.push(`第${orderNum || "未知"}题：题号或题目内容为空，已跳过`);
-          continue;
-        }
-
-        await connection.execute(
-          "INSERT INTO questions (questionnaire_id, content, order_num, min_score, max_score, is_reverse_scored) VALUES (?, ?, ?, ?, ?, ?)",
-          [questionnaireId, content, orderNum, minScore, maxScore, isReverse],
-        );
-        successCount++;
-      } catch (rowErr) {
-        errors.push(`第${row["题号"] || "未知"}题导入失败：${rowErr.message}`);
+      if (rows.length === 0) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Excel文件为空" });
       }
+      const requiredColumns = [
+        "题号",
+        "题目内容",
+        "最低分",
+        "最高分",
+        "是否反向计分",
+      ];
+      const firstRowKeys = Object.keys(rows[0]);
+      const missingColumns = requiredColumns.filter(
+        (col) => !firstRowKeys.includes(col),
+      );
+      if (missingColumns.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: `Excel缺少必要列：${missingColumns.join("、")}`,
+        });
+      }
+
+      const connection = await mysql.createConnection(dbConfig);
+
+      let successCount = 0;
+      const errors = [];
+
+      for (const row of rows) {
+        try {
+          const orderNum = row["题号"];
+          const content = row["题目内容"];
+          const minScore = row["最低分"];
+          const maxScore = row["最高分"];
+          const isReverse = row["是否反向计分"] === "是" ? 1 : 0;
+
+          if (!content || orderNum === undefined) {
+            errors.push(
+              `第${orderNum || "未知"}题：题号或题目内容为空，已跳过`,
+            );
+            continue;
+          }
+
+          await connection.execute(
+            "INSERT INTO questions (questionnaire_id, content, order_num, min_score, max_score, is_reverse_scored) VALUES (?, ?, ?, ?, ?, ?)",
+            [questionnaireId, content, orderNum, minScore, maxScore, isReverse],
+          );
+          successCount++;
+        } catch (rowErr) {
+          errors.push(
+            `第${row["题号"] || "未知"}题导入失败：${rowErr.message}`,
+          );
+        }
+      }
+
+      await connection.end();
+
+      res.json({
+        success: true,
+        message: `成功导入${successCount}道题`,
+        total: rows.length,
+        successCount,
+        errors,
+      });
+    } catch (err) {
+      console.error("导入题目失败:", err);
+      res
+        .status(500)
+        .json({ success: false, message: "文件解析失败，请检查Excel格式" });
     }
-
-    await connection.end();
-
-    res.json({
-      success: true,
-      message: `成功导入${successCount}道题`,
-      total: rows.length,
-      successCount,
-      errors,
-    });
-  } catch (err) {
-    console.error("导入题目失败:", err);
-    res
-      .status(500)
-      .json({ success: false, message: "文件解析失败，请检查Excel格式" });
-  }
-});
+  },
+);
 
 // 管理员登录接口
 app.post("/api/admin/login", async (req, res) => {
