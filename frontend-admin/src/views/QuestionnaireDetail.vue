@@ -11,6 +11,39 @@ const questionnaire = ref(null);
 const questions = ref([]);
 const loading = ref(true);
 
+const exporting = ref(false);
+
+async function exportData() {
+  exporting.value = true;
+  const token = localStorage.getItem("admin_token");
+
+  try {
+    const response = await fetch(
+      `http://localhost:3000/api/questionnaires/${questionnaireId}/export`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+
+    if (!response.ok) {
+      ElMessage.error("导出失败，请检查是否有作答数据");
+      return;
+    }
+
+    // 把响应转成blob，触发浏览器下载
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `作答数据.xlsx`;
+    a.click();
+    URL.revokeObjectURL(url);
+    ElMessage.success("导出成功");
+  } catch (err) {
+    ElMessage.error("导出失败，请检查后端服务");
+  } finally {
+    exporting.value = false;
+  }
+}
+
 async function fetchDetail() {
   const token = localStorage.getItem("admin_token");
   try {
@@ -52,7 +85,12 @@ function backToList() {
     <template v-if="questionnaire">
       <div class="header">
         <h2>{{ questionnaire.title }}</h2>
-        <el-button type="primary" @click="goImport">导入更多题目</el-button>
+        <div style="display: flex; gap: 10px">
+          <el-button type="success" @click="exportData" :loading="exporting"
+            >导出作答数据</el-button
+          >
+          <el-button type="primary" @click="goImport">导入更多题目</el-button>
+        </div>
       </div>
       <p class="desc">{{ questionnaire.description || "暂无说明" }}</p>
 

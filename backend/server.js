@@ -6,6 +6,7 @@ const multer = require("multer");
 const XLSX = require("xlsx");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const ExcelJS = require("exceljs");
 
 const app = express();
 app.use(cors());
@@ -394,6 +395,154 @@ app.get("/api/questionnaires/:id", verifyAdminToken, async (req, res) => {
     res.status(500).json({ success: false, message: "服务器错误" });
   }
 });
+
+// 导出某份问卷的所有作答数据为Excel
+app.get(
+  "/api/questionnaires/:id/export",
+  verifyAdminToken,
+  async (req, res) => {
+    const questionnaireId = req.params.id;
+
+    try {
+      const connection = await mysql.createConnection(dbConfig);
+
+      // 权限检查
+      const [qRows] = await connection.execute(
+        "SELECT * FROM questionnaires WHERE id = ?",
+        [questionnaireId],
+      );
+      if (qRows.length === 0) {
+        await connection.end();
+        return res.status(404).json({ success: false, message: "问卷不存在" });
+      }
+      const questionnaire = qRows[0];
+      if (
+        req.admin.role !== "supervisor" &&
+        questionnaire.created_by !== req.admin.adminId
+      ) {
+        await connection.end();
+        return res
+          .status(403)
+          .json({ success: false, message: "没有权限导出此问卷数据" });
+      }
+
+      // 获取题目列表（按顺序）
+      const [questions] = await connection.execute(
+        "SELECT * FROM questions WHERE questionnaire_id = ? ORDER BY order_num ASC",
+        [questionnaireId],
+      );
+
+      // 获取所有提交记录
+      const [submissions] = await connection.execute(
+        "SELECT * FROM submissions WHERE questionnaire_id = ? ORDER BY started_at ASC",
+        [questionnaireId],
+      );
+
+      // 获取所有作答记录
+      const [answers] = await connection.execute(
+        `SELECT a.* FROM answers a
+       INNER JOIN submissions s ON a.submission_id = s.id
+       WHERE s.questionnaire_id = ?`,
+        [questionnaireId],
+      );
+
+      await connection.end();
+
+      // 把answers按submission_id分组，方便后面按行组装
+      const answerMap = {};
+      answers.forEach((ans) => {
+        if (!answerMap[ans.submission_id]) answerMap[ans.submission_id] = {};
+        answerMap[ans.submission_id][ans.question_id] = ans;
+      });
+
+      // 用exceljs创建工作簿
+      const workbook = new ExcelJS.Workbook();
+      const sheet = workbook.addWorksheet("作答数据");
+
+      // 构建表头：固定列 + 每道题一列
+      const fixedHeaders = ["提交ID", "开始时间", "完成时间", "总用时(秒)"];
+      const questionHeaders = questions.map((q) => `第${q.order_num}题`);
+      const timingHeaders = questions.map((q) => `第${q.order_num}题用时(秒)`);
+      const allHeaders = [
+        ...fixedHeaders,
+        ...questionHeaders,
+        ...timingHeaders,
+      ];
+
+      sheet.addRow(allHeaders);
+
+      // 表头行加粗、背景色
+      const headerRow = sheet.getRow(1);
+      headerRow.font = { bold: true };
+      headerRow.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FFE8F5E9" },
+      };
+
+      // 每行填一条提交记录
+      submissions.forEach((sub) => {
+        const totalSeconds =
+          sub.started_at && sub.finished_at
+            ? Math.round(
+                (new Date(sub.finished_at) - new Date(sub.started_at)) / 1000,
+              )
+            : "";
+
+        const fixedCols = [
+          sub.id,
+          sub.started_at
+            ? new Date(sub.started_at).toLocaleString("zh-CN")
+            : "",
+          sub.finished_at
+            ? new Date(sub.finished_at).toLocaleString("zh-CN")
+            : "",
+          totalSeconds,
+        ];
+
+        // 每道题的作答分数
+        const scoreCols = questions.map((q) => {
+          const ans = answerMap[sub.id]?.[q.id];
+          return ans ? ans.answer_value : "";
+        });
+
+        // 每道题的作答用时（毫秒转秒）
+        const timingCols = questions.map((q) => {
+          const ans = answerMap[sub.id]?.[q.id];
+          return ans && ans.duration_ms
+            ? Math.round(ans.duration_ms / 1000)
+            : "";
+        });
+
+        sheet.addRow([...fixedCols, ...scoreCols, ...timingCols]);
+      });
+
+      // 设置列宽
+      sheet.columns.forEach((col, index) => {
+        col.width = index < 4 ? 18 : 12;
+      });
+
+      // 设置响应头，让浏览器触发下载
+      const filename = encodeURIComponent(
+        `${questionnaire.title}_作答数据.xlsx`,
+      );
+      res.setHeader(
+        "Content-Type",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      );
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename*=UTF-8''${filename}`,
+      );
+
+      await workbook.xlsx.write(res);
+      res.end();
+    } catch (err) {
+      console.error("导出失败:", err);
+      res.status(500).json({ success: false, message: "导出失败，请稍后重试" });
+    }
+  },
+);
 
 app.listen(PORT, () => {
   console.log(`后端服务已启动，访问 http://localhost:${PORT}`);
