@@ -14,6 +14,10 @@ const overallStartTime = ref(null);
 const trackingCode = ref("");
 const showTrackingInput = ref(false);
 const subjectReport = ref(null); // 提交后对受测者可见的报告
+const infoFields = ref([]); // 需要收集的字段配置
+const infoAnswers = ref({}); // 受测者填写的基本信息
+const infoSubmitted = ref(false); // 基本信息是否已提交
+const submissionId = ref(null); // 提交后拿到的submission_id，用于关联基本信息
 
 // 分角色分组
 const studentQuestions = computed(() =>
@@ -82,6 +86,23 @@ onMounted(async () => {
     if (data.success) {
       questionnaire.value = data.questionnaire;
       allQuestions.value = data.questions;
+      // 拉取基本信息字段配置
+      try {
+        const infoRes = await fetch(
+          `http://localhost:3000/api/questionnaires/${questionnaireId}/info-fields`,
+        );
+        const infoData = await infoRes.json();
+        if (infoData.success) {
+          infoFields.value = infoData.fields.map((f) => ({
+            ...f,
+            options: f.options
+              ? typeof f.options === "string"
+                ? JSON.parse(f.options)
+                : f.options
+              : [],
+          }));
+        }
+      } catch (e) {}
       overallStartTime.value = Date.now();
       allQuestions.value.forEach((q) => {
         questionDurations.value[q.id] = 0;
@@ -185,6 +206,31 @@ function confirmExit() {
   }
 }
 
+async function submitSubjectInfo(subId) {
+  const info = infoFields.value.map((f) => ({
+    field_key: f.field_key,
+    field_label: f.field_label,
+    value: infoAnswers.value[f.field_key] || "",
+  }));
+  try {
+    await fetch(`http://localhost:3000/api/submissions/${subId}/subject-info`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ info }),
+    });
+  } catch (e) {}
+}
+
+function hasInfoAnswered() {
+  return infoFields.value
+    .filter((f) => f.is_required)
+    .every(
+      (f) =>
+        infoAnswers.value[f.field_key] &&
+        String(infoAnswers.value[f.field_key]).trim(),
+    );
+}
+
 async function submitQuestionnaire() {
   const finishedAt = Date.now();
   const answers = allQuestions.value.map((q) => {
@@ -233,8 +279,13 @@ async function submitQuestionnaire() {
 
   const data = await response.json();
   if (data.success) {
+    submissionId.value = data.submission_id;
+    // 如果有基本信息字段需要填，先提交基本信息
+    if (infoFields.value.length > 0) {
+      await submitSubjectInfo(data.submission_id);
+    }
     submitted.value = true;
-    // 拉取对受测者可见的报告
+    // 拉取报告
     try {
       const reportRes = await fetch(
         `http://localhost:3000/api/submissions/${data.submission_id}/report-public`,
@@ -243,9 +294,7 @@ async function submitQuestionnaire() {
       if (reportData.success && reportData.matched_rule) {
         subjectReport.value = reportData.matched_rule;
       }
-    } catch (e) {
-      // 报告加载失败不影响提交成功的展示
-    }
+    } catch (e) {}
   }
 }
 </script>
@@ -372,7 +421,90 @@ async function submitQuestionnaire() {
         </button>
       </div>
 
-      <div v-else-if="!submitted" class="quiz-card">
+      <!-- 基本信息填写（知情同意后、答题前） -->
+      <div
+        v-else-if="infoFields.length > 0 && !infoSubmitted"
+        class="info-card"
+      >
+        <h2>基本信息</h2>
+        <p class="info-subtitle">请先填写以下基本信息，所有信息将匿名保存</p>
+
+        <div class="info-form">
+          <div
+            v-for="field in infoFields"
+            :key="field.field_key"
+            class="info-field"
+          >
+            <label class="info-label">
+              {{ field.field_label }}
+              <span v-if="field.is_required" class="required">*</span>
+            </label>
+
+            <!-- 文本输入 -->
+            <input
+              v-if="field.field_type === 'text'"
+              v-model="infoAnswers[field.field_key]"
+              type="text"
+              class="info-input"
+              :placeholder="`请输入${field.field_label}`"
+            />
+
+            <!-- 数字输入 -->
+            <input
+              v-else-if="field.field_type === 'number'"
+              v-model="infoAnswers[field.field_key]"
+              type="number"
+              class="info-input"
+              :placeholder="`请输入${field.field_label}`"
+            />
+
+            <!-- 单选按钮 -->
+            <div v-else-if="field.field_type === 'radio'" class="radio-group">
+              <label
+                v-for="opt in field.options"
+                :key="opt"
+                class="radio-item"
+                :class="{ active: infoAnswers[field.field_key] === opt }"
+              >
+                <input
+                  type="radio"
+                  :name="field.field_key"
+                  :value="opt"
+                  v-model="infoAnswers[field.field_key]"
+                  style="display: none"
+                />
+                {{ opt }}
+              </label>
+            </div>
+
+            <!-- 下拉选择 -->
+            <select
+              v-else-if="field.field_type === 'select'"
+              v-model="infoAnswers[field.field_key]"
+              class="info-select"
+            >
+              <option value="" disabled>请选择</option>
+              <option v-for="opt in field.options" :key="opt" :value="opt">
+                {{ opt }}
+              </option>
+            </select>
+          </div>
+        </div>
+
+        <button
+          class="consent-btn"
+          @click="infoSubmitted = true"
+          :disabled="!hasInfoAnswered()"
+          :style="!hasInfoAnswered() ? 'opacity:0.4;cursor:not-allowed;' : ''"
+        >
+          确认，开始作答
+        </button>
+      </div>
+
+      <div
+        v-else-if="(infoFields.length === 0 || infoSubmitted) && !submitted"
+        class="quiz-card"
+      >
         <!-- 阶段提示（有家长题时显示） -->
         <div v-if="hasParentSection" class="phase-banner" :class="currentPhase">
           {{
@@ -977,5 +1109,85 @@ async function submitQuestionnaire() {
   font-size: 13px;
   color: #8aaa94;
   margin: 0;
+}
+
+.info-card {
+  background: rgba(255, 255, 255, 0.92);
+  border-radius: 20px;
+  padding: 32px 28px;
+  box-shadow: 0 16px 40px rgba(76, 175, 125, 0.12);
+}
+.info-card h2 {
+  font-size: 19px;
+  font-weight: 600;
+  color: #2e4a38;
+  margin: 0 0 6px;
+}
+.info-subtitle {
+  font-size: 13px;
+  color: #8aaa94;
+  margin: 0 0 24px;
+}
+.info-form {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  margin-bottom: 24px;
+}
+.info-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.info-label {
+  font-size: 14px;
+  font-weight: 500;
+  color: #2e4a38;
+}
+.required {
+  color: #f44336;
+  margin-left: 2px;
+}
+.info-input {
+  height: 40px;
+  padding: 0 12px;
+  border: 1.5px solid #dcefe0;
+  border-radius: 10px;
+  font-size: 14px;
+  color: #3d5a48;
+  outline: none;
+}
+.info-input:focus {
+  border-color: #4caf7d;
+}
+.info-select {
+  height: 40px;
+  padding: 0 12px;
+  border: 1.5px solid #dcefe0;
+  border-radius: 10px;
+  font-size: 14px;
+  color: #3d5a48;
+  outline: none;
+  background: white;
+}
+.radio-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.radio-item {
+  padding: 6px 16px;
+  border-radius: 20px;
+  border: 1.5px solid #dcefe0;
+  background: white;
+  font-size: 13px;
+  color: #5a7a64;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.radio-item.active {
+  background: linear-gradient(135deg, #6fcf97, #4caf7d);
+  border-color: #4caf7d;
+  color: white;
 }
 </style>

@@ -655,12 +655,34 @@ app.get(
       // 获取所有答案
       const [answers] = await connection.execute(
         `SELECT a.* FROM answers a
-       INNER JOIN submissions s ON a.submission_id = s.id
-       WHERE s.questionnaire_id = ?`,
+   INNER JOIN submissions s ON a.submission_id = s.id
+   WHERE s.questionnaire_id = ?`,
+        [questionnaireId],
+      );
+
+      // 获取基本信息字段配置
+      const [infoFields] = await connection.execute(
+        "SELECT * FROM subject_info_fields WHERE questionnaire_id = ? ORDER BY order_num ASC",
+        [questionnaireId],
+      );
+
+      // 获取所有提交的基本信息
+      const [allSubjectInfo] = await connection.execute(
+        `SELECT si.* FROM subject_info si
+   INNER JOIN submissions s ON si.submission_id = s.id
+   WHERE s.questionnaire_id = ?`,
         [questionnaireId],
       );
 
       await connection.end();
+
+      // 把基本信息按submission_id分组
+      const subjectInfoMap = {};
+      allSubjectInfo.forEach((item) => {
+        if (!subjectInfoMap[item.submission_id])
+          subjectInfoMap[item.submission_id] = {};
+        subjectInfoMap[item.submission_id][item.field_key] = item.value;
+      });
 
       // 按submission_id分组答案
       const answerMap = {};
@@ -674,13 +696,17 @@ app.get(
       const sheet = workbook.addWorksheet("作答数据");
 
       // 构建表头
+      // 基本信息列（放在最前面）
+      const infoHeaders = infoFields.map((f) => f.field_label);
       const fixedHeaders = [
         "提交ID",
         "追踪码",
+        ...infoHeaders,
         "开始时间",
         "完成时间",
         "总用时(秒)",
       ];
+
       const questionScoreHeaders = questions.map((q) => {
         const typeMap = {
           scale: "得分",
@@ -751,9 +777,16 @@ app.get(
             : "";
 
         // 固定列
+        // 基本信息列数据
+        const infoCols = infoFields.map((f) => {
+          const subInfo = subjectInfoMap[sub.id] || {};
+          return subInfo[f.field_key] || "";
+        });
+
         const fixedCols = [
           sub.id,
           sub.tracking_code || "",
+          ...infoCols,
           sub.started_at
             ? new Date(sub.started_at).toLocaleString("zh-CN")
             : "",
@@ -864,9 +897,10 @@ app.get(
       });
 
       // 设置列宽
+      const fixedColCount = 3 + infoFields.length; // 提交ID + 追踪码 + 基本信息列 + 时间列
       sheet.columns.forEach((col, index) => {
-        if (index < 4) col.width = 18;
-        else if (index < 4 + questions.length * 2) col.width = 14;
+        if (index < fixedColCount) col.width = 16;
+        else if (index < fixedColCount + questions.length * 2) col.width = 14;
         else col.width = 16;
       });
 
@@ -1802,6 +1836,133 @@ app.get("/api/submissions/:id/report", verifyAdminToken, async (req, res) => {
     res.status(500).json({ success: false, message: "服务器错误" });
   }
 });
+
+// 获取某份问卷的基本信息字段配置
+app.get("/api/questionnaires/:id/info-fields", async (req, res) => {
+  const questionnaireId = req.params.id;
+  try {
+    const connection = await mysql.createConnection(dbConfig);
+    const [fields] = await connection.execute(
+      "SELECT * FROM subject_info_fields WHERE questionnaire_id = ? ORDER BY order_num ASC",
+      [questionnaireId],
+    );
+    await connection.end();
+    res.json({ success: true, fields });
+  } catch (err) {
+    console.error("获取信息字段失败:", err);
+    res.status(500).json({ success: false, message: "服务器错误" });
+  }
+});
+
+// 保存问卷的基本信息字段配置（管理端，需登录）
+app.post(
+  "/api/questionnaires/:id/info-fields",
+  verifyAdminToken,
+  async (req, res) => {
+    const questionnaireId = req.params.id;
+    const { fields } = req.body;
+
+    if (!Array.isArray(fields)) {
+      return res.status(400).json({ success: false, message: "参数格式错误" });
+    }
+
+    const connection = await mysql.createConnection(dbConfig);
+    try {
+      const [qRows] = await connection.execute(
+        "SELECT * FROM questionnaires WHERE id = ?",
+        [questionnaireId],
+      );
+      if (qRows.length === 0) {
+        await connection.end();
+        return res.status(404).json({ success: false, message: "问卷不存在" });
+      }
+      if (
+        req.admin.role !== "supervisor" &&
+        qRows[0].created_by !== req.admin.adminId
+      ) {
+        await connection.end();
+        return res.status(403).json({ success: false, message: "没有权限" });
+      }
+
+      // 全量更新
+      await connection.execute(
+        "DELETE FROM subject_info_fields WHERE questionnaire_id = ?",
+        [questionnaireId],
+      );
+
+      for (let i = 0; i < fields.length; i++) {
+        const f = fields[i];
+        await connection.execute(
+          `INSERT INTO subject_info_fields
+          (questionnaire_id, field_key, field_label, field_type, options, is_required, order_num)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            questionnaireId,
+            f.field_key,
+            f.field_label,
+            f.field_type || "text",
+            f.options ? JSON.stringify(f.options) : null,
+            f.is_required !== false ? 1 : 0,
+            i + 1,
+          ],
+        );
+      }
+
+      await connection.end();
+      res.json({ success: true, message: "保存成功" });
+    } catch (err) {
+      await connection.end();
+      console.error("保存信息字段失败:", err);
+      res.status(500).json({ success: false, message: "服务器错误" });
+    }
+  },
+);
+
+// 提交受测者基本信息（用户端，不需要登录）
+app.post("/api/submissions/:id/subject-info", async (req, res) => {
+  const submissionId = req.params.id;
+  const { info } = req.body; // [{ field_key, field_label, value }]
+
+  if (!Array.isArray(info)) {
+    return res.status(400).json({ success: false, message: "参数格式错误" });
+  }
+
+  try {
+    const connection = await mysql.createConnection(dbConfig);
+    for (const item of info) {
+      await connection.execute(
+        "INSERT INTO subject_info (submission_id, field_key, field_label, value) VALUES (?, ?, ?, ?)",
+        [submissionId, item.field_key, item.field_label, item.value || ""],
+      );
+    }
+    await connection.end();
+    res.json({ success: true, message: "基本信息已保存" });
+  } catch (err) {
+    console.error("保存基本信息失败:", err);
+    res.status(500).json({ success: false, message: "服务器错误" });
+  }
+});
+
+// 获取某次提交的基本信息（管理端查看用）
+app.get(
+  "/api/submissions/:id/subject-info",
+  verifyAdminToken,
+  async (req, res) => {
+    const submissionId = req.params.id;
+    try {
+      const connection = await mysql.createConnection(dbConfig);
+      const [info] = await connection.execute(
+        "SELECT * FROM subject_info WHERE submission_id = ? ORDER BY id ASC",
+        [submissionId],
+      );
+      await connection.end();
+      res.json({ success: true, info });
+    } catch (err) {
+      console.error("获取基本信息失败:", err);
+      res.status(500).json({ success: false, message: "服务器错误" });
+    }
+  },
+);
 
 app.listen(PORT, () => {
   console.log(`后端服务已启动，访问 http://localhost:${PORT}`);

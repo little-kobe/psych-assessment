@@ -1,5 +1,6 @@
 <script setup>
 import { ref, onMounted } from "vue";
+import { ArrowLeft } from "@element-plus/icons-vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 
@@ -19,6 +20,7 @@ const showEditDialog = ref(false);
 const saving = ref(false);
 const activeTab = ref("questions"); // questions 或 submissions
 const reportDetail = ref(null);
+const subjectInfoDetail = ref([]);
 
 const editForm = ref({
   title: "",
@@ -93,6 +95,7 @@ function openEditDialog() {
 }
 
 async function viewAnswers(submissionId) {
+  subjectInfoDetail.value = [];
   answerLoading.value = true;
   showAnswerDialog.value = true;
   answerDetail.value = null;
@@ -110,6 +113,13 @@ async function viewAnswers(submissionId) {
       `http://localhost:3000/api/submissions/${submissionId}/report`,
       { headers: { Authorization: `Bearer ${token}` } },
     );
+    // 同时拉取基本信息
+    const infoRes = await fetch(
+      `http://localhost:3000/api/submissions/${submissionId}/subject-info`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+    const infoData = await infoRes.json();
+    if (infoData.success) subjectInfoDetail.value = infoData.info;
     const reportData = await reportRes.json();
     if (reportData.success) reportDetail.value = reportData;
   } catch (err) {
@@ -234,37 +244,76 @@ onMounted(fetchDetail);
 
 <template>
   <div class="container" v-loading="loading">
-    <el-button @click="backToList" text>← 返回问卷列表</el-button>
+    <!-- 顶部导航栏 -->
+    <div class="page-nav">
+      <el-button @click="backToList" :icon="ArrowLeft" round size="small"
+        >问卷列表</el-button
+      >
+    </div>
 
     <template v-if="questionnaire">
-      <div class="header">
-        <div>
-          <h2>{{ questionnaire.title }}</h2>
-          <p class="desc">{{ questionnaire.description || "暂无说明" }}</p>
+      <!-- 标题区域 -->
+      <div class="page-header">
+        <div class="title-section">
+          <h2 class="page-title">{{ questionnaire.title }}</h2>
+          <p class="page-desc">{{ questionnaire.description || "暂无说明" }}</p>
         </div>
-        <div class="header-btns">
+        <div class="action-section">
+          <el-button size="small" plain @click="openEditDialog">
+            <span>编辑问卷</span>
+          </el-button>
           <el-button
+            size="small"
+            plain
+            @click="
+              router.push(`/questionnaire/${questionnaireId}/info-fields`)
+            "
+          >
+            <span>基本信息</span>
+          </el-button>
+          <el-button
+            size="small"
+            plain
             @click="
               router.push(`/questionnaire/${questionnaireId}/score-rules`)
             "
-            >分数段报告</el-button
           >
-          <el-button @click="openEditDialog">编辑问卷</el-button>
+            <span>分数段报告</span>
+          </el-button>
           <el-button
+            size="small"
+            plain
             @click="router.push(`/questionnaire/${questionnaireId}/dimensions`)"
-            >配置维度</el-button
           >
-          <el-button type="success" @click="exportData" :loading="exporting"
-            >导出数据</el-button
-          >
-          <el-button type="primary" @click="goImport">导入题目</el-button
-          ><el-button
-            type="primary"
+            <span>配置维度</span>
+          </el-button>
+          <el-divider direction="vertical" />
+          <el-button
+            size="small"
+            type="warning"
+            plain
             @click="
               router.push(`/questionnaire/${questionnaireId}/edit-questions`)
             "
-            >编辑题目</el-button
           >
+            <span>编辑题目</span>
+          </el-button>
+          <el-button
+            size="small"
+            type="info"
+            plain
+            @click="router.push(`/import?qid=${questionnaireId}`)"
+          >
+            <span>导入题目</span>
+          </el-button>
+          <el-button
+            size="small"
+            type="success"
+            @click="exportData"
+            :loading="exporting"
+          >
+            <span>导出数据</span>
+          </el-button>
         </div>
       </div>
 
@@ -520,6 +569,20 @@ onMounted(fetchDetail);
               追踪码：{{ answerDetail.submission.tracking_code }}
             </span>
           </div>
+
+          <div v-if="subjectInfoDetail.length > 0" class="info-section">
+            <div class="info-section-title">被试基本信息</div>
+            <div class="info-grid">
+              <div
+                v-for="item in subjectInfoDetail"
+                :key="item.field_key"
+                class="info-item"
+              >
+                <span class="info-key">{{ item.field_label }}</span>
+                <span class="info-val">{{ item.value || "-" }}</span>
+              </div>
+            </div>
+          </div>
           <div
             v-if="reportDetail && reportDetail.matched_rule"
             class="report-block"
@@ -624,6 +687,46 @@ onMounted(fetchDetail);
 </template>
 
 <style scoped>
+.action-section .el-button {
+  margin: 0;
+}
+.action-section .el-divider--vertical {
+  height: 24px;
+  margin: 0 4px;
+}
+
+.info-section {
+  margin: 12px 0;
+  padding: 12px;
+  background: #f9f9f9;
+  border-radius: 8px;
+}
+.info-section-title {
+  font-size: 12px;
+  color: #999;
+  margin-bottom: 10px;
+  font-weight: 600;
+}
+.info-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.info-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 120px;
+}
+.info-key {
+  font-size: 11px;
+  color: #aaa;
+}
+.info-val {
+  font-size: 13px;
+  color: #3d2b12;
+  font-weight: 500;
+}
 .report-label-row {
   display: flex;
   align-items: center;
@@ -696,37 +799,65 @@ onMounted(fetchDetail);
   color: #8b5a2b;
 }
 
-.container {
-  max-width: 860px;
-  margin: 20px auto;
-  padding: 24px;
-}
-.header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  margin-top: 16px;
-  gap: 16px;
-}
 .header h2 {
   margin: 0 0 4px;
   font-size: 20px;
   color: #3d2b12;
 }
-.header-btns {
-  display: flex;
-  gap: 8px;
-  flex-shrink: 0;
+
+.container {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 16px 24px 24px;
 }
-.desc {
-  color: #888;
+.page-nav {
+  margin-bottom: 16px;
+}
+.page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 20px;
+  background: #fff;
+  border-radius: 12px;
+  border: 1px solid #f0dcae;
+  margin-bottom: 20px;
+}
+.title-section {
+  flex: 1;
+  min-width: 0;
+}
+.page-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: #3d2b12;
+  margin: 0 0 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.page-desc {
   font-size: 13px;
-  margin: 0 0 12px;
+  color: #999;
+  margin: 0 0 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .meta {
   display: flex;
-  gap: 8px;
+  gap: 6px;
   flex-wrap: wrap;
+}
+.action-section {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  max-width: 520px;
 }
 
 .dim-scores {
