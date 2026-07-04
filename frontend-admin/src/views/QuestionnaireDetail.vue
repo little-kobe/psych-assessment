@@ -6,7 +6,9 @@ import { ElMessage } from "element-plus";
 const route = useRoute();
 const router = useRouter();
 const questionnaireId = route.params.id;
-
+const showAnswerDialog = ref(false);
+const answerDetail = ref(null);
+const answerLoading = ref(false);
 const questionnaire = ref(null);
 const questions = ref([]);
 const submissions = ref([]);
@@ -89,6 +91,34 @@ function openEditDialog() {
   showEditDialog.value = true;
 }
 
+async function viewAnswers(submissionId) {
+  answerLoading.value = true;
+  showAnswerDialog.value = true;
+  answerDetail.value = null;
+  const token = localStorage.getItem("admin_token");
+  const reportDetail = ref(null);
+  try {
+    const token = localStorage.getItem("admin_token");
+    const [ansRes, reportRes] = await Promise.all([
+      fetch(`http://localhost:3000/api/submissions/${submissionId}/answers`, {
+        headers: { Authorization: `Bearer ${token}` },
+      }),
+      fetch(`http://localhost:3000/api/submissions/${submissionId}/report`, {
+        headers: { Authorization: `Bearer ${token}` },
+      }),
+    ]);
+    const ansData = await ansRes.json();
+    const reportData = await reportRes.json();
+    if (ansData.success) answerDetail.value = ansData;
+    if (reportData.success) reportDetail.value = reportData;
+    else reportDetail.value = null;
+  } catch (err) {
+    ElMessage.error("加载失败");
+  } finally {
+    answerLoading.value = false;
+  }
+}
+
 async function saveEdit() {
   if (!editForm.value.title) {
     ElMessage.warning("问卷标题不能为空");
@@ -163,6 +193,35 @@ function formatTime(timeStr) {
   return new Date(timeStr).toLocaleString("zh-CN");
 }
 
+function typeLabel(type) {
+  const map = {
+    scale: "量表",
+    single_choice: "单选",
+    multiple_choice: "多选",
+    yes_no: "是否",
+    open_text: "开放题",
+  };
+  return map[type] || "量表";
+}
+
+function roleLabel(role) {
+  const map = { student: "学生", parent: "家长", both: "通用" };
+  return map[role] || "通用";
+}
+
+function roleTagType(role) {
+  return role === "parent" ? "warning" : role === "both" ? "success" : "info";
+}
+
+function parseOptions(options) {
+  if (!options) return [];
+  try {
+    return typeof options === "string" ? JSON.parse(options) : options;
+  } catch {
+    return [];
+  }
+}
+
 function goImport() {
   router.push(`/import?qid=${questionnaireId}`);
 }
@@ -184,6 +243,12 @@ onMounted(fetchDetail);
           <p class="desc">{{ questionnaire.description || "暂无说明" }}</p>
         </div>
         <div class="header-btns">
+          <el-button
+            @click="
+              router.push(`/questionnaire/${questionnaireId}/score-rules`)
+            "
+            >分数段报告</el-button
+          >
           <el-button @click="openEditDialog">编辑问卷</el-button>
           <el-button
             @click="router.push(`/questionnaire/${questionnaireId}/dimensions`)"
@@ -192,7 +257,14 @@ onMounted(fetchDetail);
           <el-button type="success" @click="exportData" :loading="exporting"
             >导出数据</el-button
           >
-          <el-button type="primary" @click="goImport">导入题目</el-button>
+          <el-button type="primary" @click="goImport">导入题目</el-button
+          ><el-button
+            type="primary"
+            @click="
+              router.push(`/questionnaire/${questionnaireId}/edit-questions`)
+            "
+            >编辑题目</el-button
+          >
         </div>
       </div>
 
@@ -217,20 +289,62 @@ onMounted(fetchDetail);
         <el-tab-pane label="题目列表" name="questions">
           <el-table :data="questions" v-if="questions.length > 0">
             <el-table-column prop="order_num" label="序号" width="70" />
-            <el-table-column prop="content" label="题目内容" />
-            <el-table-column label="分值范围" width="110">
+            <el-table-column prop="content" label="题目内容" min-width="180" />
+            <el-table-column label="题型" width="100">
               <template #default="scope">
-                {{ scope.row.min_score }} - {{ scope.row.max_score }}
+                <el-tag size="small" type="primary">
+                  {{ typeLabel(scope.row.question_type) }}
+                </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="反向计分" width="90">
+            <el-table-column label="填写角色" width="90">
               <template #default="scope">
-                <el-tag
-                  :type="scope.row.is_reverse_scored ? 'warning' : 'info'"
-                  size="small"
-                >
-                  {{ scope.row.is_reverse_scored ? "是" : "否" }}
+                <el-tag size="small" :type="roleTagType(scope.row.role)">
+                  {{ roleLabel(scope.row.role) }}
                 </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="选项/分值" min-width="160">
+              <template #default="scope">
+                <span
+                  v-if="
+                    scope.row.question_type === 'scale' ||
+                    !scope.row.question_type
+                  "
+                >
+                  {{ scope.row.min_score }} - {{ scope.row.max_score }} 分
+                  <el-tag
+                    v-if="scope.row.is_reverse_scored"
+                    size="small"
+                    type="warning"
+                    style="margin-left: 4px"
+                    >反向</el-tag
+                  >
+                </span>
+                <span
+                  v-else-if="scope.row.question_type === 'yes_no'"
+                  style="color: #999; font-size: 12px"
+                >
+                  是 / 否
+                </span>
+                <span
+                  v-else-if="scope.row.question_type === 'open_text'"
+                  style="color: #999; font-size: 12px"
+                >
+                  文字输入
+                </span>
+                <span
+                  v-else-if="
+                    ['single_choice', 'multiple_choice'].includes(
+                      scope.row.question_type,
+                    ) && scope.row.options
+                  "
+                >
+                  <span style="font-size: 12px; color: #666">
+                    {{ parseOptions(scope.row.options).join(" / ") }}
+                  </span>
+                </span>
+                <span v-else style="color: #ccc; font-size: 12px">—</span>
               </template>
             </el-table-column>
           </el-table>
@@ -276,6 +390,14 @@ onMounted(fetchDetail);
                         : "部分"
                     }}
                   </el-tag>
+                </template>
+              </el-table-column>
+
+              <el-table-column label="查看" width="90">
+                <template #default="scope">
+                  <el-button size="small" @click="viewAnswers(scope.row.id)"
+                    >详情</el-button
+                  >
                 </template>
               </el-table-column>
 
@@ -382,10 +504,174 @@ onMounted(fetchDetail);
         >
       </template>
     </el-dialog>
+
+    <!-- 答案详情弹窗 -->
+    <el-dialog v-model="showAnswerDialog" title="作答详情" width="600px">
+      <div v-loading="answerLoading">
+        <div v-if="answerDetail">
+          <div class="answer-meta">
+            <span>提交编号：{{ answerDetail.submission.id }}</span>
+            <span
+              >提交时间：{{
+                formatTime(answerDetail.submission.finished_at)
+              }}</span
+            >
+            <span v-if="answerDetail.submission.tracking_code">
+              追踪码：{{ answerDetail.submission.tracking_code }}
+            </span>
+          </div>
+          <div
+            v-if="reportDetail && reportDetail.matched_rule"
+            class="report-block"
+          >
+            <div class="report-score">
+              总分：<strong>{{ reportDetail.total_score }}</strong> 分
+            </div>
+            <div
+              class="report-label"
+              :class="
+                reportDetail.matched_rule.visible_to_subject
+                  ? 'visible'
+                  : 'admin-only'
+              "
+            >
+              <el-tag
+                :type="
+                  reportDetail.matched_rule.visible_to_subject
+                    ? 'success'
+                    : 'warning'
+                "
+                size="small"
+              >
+                {{
+                  reportDetail.matched_rule.visible_to_subject
+                    ? "受测者可见"
+                    : "仅管理员可见"
+                }}
+              </el-tag>
+              <span class="label-text">{{
+                reportDetail.matched_rule.label
+              }}</span>
+            </div>
+            <div
+              v-if="reportDetail.matched_rule.description"
+              class="report-desc"
+            >
+              {{ reportDetail.matched_rule.description }}
+            </div>
+          </div>
+          <div
+            v-else-if="reportDetail && !reportDetail.matched_rule"
+            class="report-block no-match"
+          >
+            总分 {{ reportDetail.total_score }} 分，未匹配到任何分数段配置
+          </div>
+
+          <el-table
+            :data="answerDetail.answers"
+            size="small"
+            style="margin-top: 12px"
+          >
+            <el-table-column prop="order_num" label="题号" width="60" />
+            <el-table-column
+              prop="content"
+              label="题目"
+              min-width="160"
+              show-overflow-tooltip
+            />
+            <el-table-column label="题型" width="70">
+              <template #default="scope">
+                <el-tag size="small" type="info">{{
+                  typeLabel(scope.row.question_type)
+                }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="角色" width="70">
+              <template #default="scope">
+                <el-tag
+                  size="small"
+                  :type="scope.row.role === 'parent' ? 'warning' : 'info'"
+                >
+                  {{ roleLabel(scope.row.role) }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="答案" min-width="120">
+              <template #default="scope">
+                <span
+                  v-if="scope.row.display_value"
+                  style="color: #3d2b12; font-weight: 500"
+                >
+                  {{ scope.row.display_value }}
+                </span>
+                <span v-else style="color: #ccc">未作答</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="用时" width="80">
+              <template #default="scope">
+                {{
+                  scope.row.duration_ms
+                    ? Math.round(scope.row.duration_ms / 1000) + "s"
+                    : "-"
+                }}
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
 <style scoped>
+.answer-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  font-size: 13px;
+  color: #888;
+  padding: 8px 0;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.report-block {
+  margin: 12px 0;
+  padding: 12px 16px;
+  background: #f4fbf6;
+  border-radius: 8px;
+  border-left: 3px solid #4caf7d;
+}
+.report-score {
+  font-size: 14px;
+  color: #3d2b12;
+  margin-bottom: 8px;
+}
+.report-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.label-text {
+  font-size: 15px;
+  font-weight: 600;
+  color: #2e4a38;
+}
+.report-desc {
+  font-size: 13px;
+  color: #5a7a64;
+  line-height: 1.6;
+}
+.no-match {
+  color: #999;
+  font-size: 13px;
+  border-left-color: #ddd;
+  background: #fafafa;
+}
+.admin-only .label-text {
+  color: #8b5a2b;
+}
+
 .container {
   max-width: 860px;
   margin: 20px auto;

@@ -47,6 +47,126 @@ app.get("/", (req, res) => {
   res.send("心理测评后端服务运行中");
 });
 
+// 公共计分函数，所有报告接口复用这一个
+async function calcScore(questionnaireId, submissionId, connection) {
+  const [questions] = await connection.execute(
+    "SELECT * FROM questions WHERE questionnaire_id = ?",
+    [questionnaireId],
+  );
+  const questionMap = {};
+  questions.forEach((q) => {
+    questionMap[q.id] = q;
+  });
+
+  const [dimensions] = await connection.execute(
+    "SELECT * FROM dimensions WHERE questionnaire_id = ?",
+    [questionnaireId],
+  );
+  for (const dim of dimensions) {
+    const [dqs] = await connection.execute(
+      "SELECT question_id FROM dimension_questions WHERE dimension_id = ?",
+      [dim.id],
+    );
+    dim.question_ids = dqs.map((d) => d.question_id);
+  }
+
+  const [answers] = await connection.execute(
+    "SELECT * FROM answers WHERE submission_id = ?",
+    [submissionId],
+  );
+
+  // 第一步：处理反向计分，只处理量表题
+  const scoredAnswers = {};
+  answers.forEach((ans) => {
+    const q = questionMap[ans.question_id];
+    if (!q) return;
+    // 非量表题不参与计分
+    if (q.question_type && q.question_type !== "scale") return;
+    if (ans.answer_value === null || ans.answer_value === undefined) return;
+    let score = Number(ans.answer_value);
+    if (q.is_reverse_scored) {
+      score = Number(q.max_score) + Number(q.min_score) - score;
+    }
+    scoredAnswers[ans.question_id] = score;
+  });
+
+  // 第二步：按维度汇总
+  let totalScore = 0;
+  const dimensionScores = dimensions.map((dim) => {
+    const scores = dim.question_ids
+      .map((qid) => scoredAnswers[qid])
+      .filter((s) => s !== undefined && !isNaN(s));
+
+    let dimScore = 0;
+    if (scores.length > 0) {
+      if (dim.score_formula === "mean") {
+        dimScore =
+          Math.round(
+            (scores.reduce((a, b) => a + b, 0) / scores.length) * 100,
+          ) / 100;
+      } else {
+        dimScore = scores.reduce((a, b) => a + b, 0);
+      }
+    }
+    totalScore += dimScore;
+    return { name: dim.name, score: dimScore, formula: dim.score_formula };
+  });
+
+  // 如果没有配置维度，直接把所有量表题分数加总
+  if (dimensions.length === 0) {
+    totalScore = Object.values(scoredAnswers).reduce((a, b) => a + b, 0);
+  }
+
+  totalScore = Math.round(totalScore * 100) / 100;
+
+  return { totalScore, dimensionScores, questionMap, scoredAnswers };
+}
+
+// 公开报告接口：只返回对受测者可见的分数段评价
+app.get("/api/submissions/:id/report-public", async (req, res) => {
+  const submissionId = req.params.id;
+  try {
+    const connection = await mysql.createConnection(dbConfig);
+
+    const [subRows] = await connection.execute(
+      "SELECT * FROM submissions WHERE id = ?",
+      [submissionId],
+    );
+    if (subRows.length === 0) {
+      await connection.end();
+      return res.status(404).json({ success: false, message: "不存在" });
+    }
+    const questionnaireId = subRows[0].questionnaire_id;
+
+    const { totalScore } = await calcScore(
+      questionnaireId,
+      submissionId,
+      connection,
+    );
+
+    const [rules] = await connection.execute(
+      "SELECT * FROM score_rules WHERE questionnaire_id = ? AND visible_to_subject = 1 ORDER BY min_score ASC",
+      [questionnaireId],
+    );
+    const matchedRule =
+      rules.find(
+        (r) =>
+          totalScore >= Number(r.min_score) &&
+          totalScore <= Number(r.max_score),
+      ) || null;
+
+    await connection.end();
+    res.json({
+      success: true,
+      total_score: totalScore,
+      matched_rule: matchedRule,
+    });
+  } catch (err) {
+    console.error("获取公开报告失败:", err);
+    res.status(500).json({ success: false, message: "服务器错误" });
+  }
+});
+
 // 旧的单题demo接口
 app.post("/api/submit", async (req, res) => {
   const { answer_value, start_time, end_time } = req.body;
@@ -142,21 +262,28 @@ app.get("/api/questionnaire/:id", async (req, res) => {
 
 // 接收整份问卷的提交
 app.post("/api/submission", async (req, res) => {
-  const { questionnaire_id, started_at, finished_at, answers } = req.body;
+  const { questionnaire_id, started_at, finished_at, answers, tracking_code } =
+    req.body;
 
   const connection = await mysql.createConnection(dbConfig);
 
   try {
     const [submissionResult] = await connection.execute(
-      "INSERT INTO submissions (questionnaire_id, started_at, finished_at) VALUES (?, ?, ?)",
-      [questionnaire_id, started_at, finished_at],
+      "INSERT INTO submissions (questionnaire_id, started_at, finished_at, tracking_code) VALUES (?, ?, ?, ?)",
+      [questionnaire_id, started_at, finished_at, tracking_code || null],
     );
     const submissionId = submissionResult.insertId;
 
     for (const ans of answers) {
       await connection.execute(
-        "INSERT INTO answers (submission_id, question_id, answer_value, duration_ms) VALUES (?, ?, ?, ?)",
-        [submissionId, ans.question_id, ans.answer_value, ans.duration_ms],
+        "INSERT INTO answers (submission_id, question_id, answer_value, answer_text, duration_ms) VALUES (?, ?, ?, ?, ?)",
+        [
+          submissionId,
+          ans.question_id,
+          ans.answer_value !== undefined ? ans.answer_value : null,
+          ans.answer_text || null,
+          ans.duration_ms,
+        ],
       );
     }
 
@@ -548,12 +675,29 @@ app.get(
       const sheet = workbook.addWorksheet("作答数据");
 
       // 构建表头
-      const fixedHeaders = ["提交ID", "开始时间", "完成时间", "总用时(秒)"];
-      const questionScoreHeaders = questions.map(
-        (q) => `第${q.order_num}题原始分`,
-      );
+      const fixedHeaders = [
+        "提交ID",
+        "追踪码",
+        "开始时间",
+        "完成时间",
+        "总用时(秒)",
+      ];
+      const questionScoreHeaders = questions.map((q) => {
+        const typeMap = {
+          scale: "得分",
+          single_choice: "选项",
+          multiple_choice: "选项",
+          yes_no: "是否",
+          open_text: "回答",
+        };
+        const typeSuffix = typeMap[q.question_type] || "得分";
+        // 题目内容超过12个字截断，避免列名过长
+        const shortContent =
+          q.content.length > 12 ? q.content.slice(0, 12) + "…" : q.content;
+        return `Q${q.order_num}_${shortContent}(${typeSuffix})`;
+      });
       const questionTimeHeaders = questions.map(
-        (q) => `第${q.order_num}题用时(秒)`,
+        (q) => `Q${q.order_num}_用时(秒)`,
       );
       const dimensionHeaders = dimensions.map(
         (d) => `${d.name}(${d.score_formula === "mean" ? "均值" : "求和"})`,
@@ -610,6 +754,7 @@ app.get(
         // 固定列
         const fixedCols = [
           sub.id,
+          sub.tracking_code || "",
           sub.started_at
             ? new Date(sub.started_at).toLocaleString("zh-CN")
             : "",
@@ -622,7 +767,25 @@ app.get(
         // 每题原始分
         const rawScores = questions.map((q) => {
           const ans = subAnswers[q.id];
-          return ans ? ans.answer_value : "";
+          if (!ans) return "";
+          // 文字类答案（多选、是否、开放题、文字单选）优先显示answer_text
+          if (
+            ans.answer_text !== null &&
+            ans.answer_text !== undefined &&
+            ans.answer_text !== ""
+          ) {
+            try {
+              // 多选题存的是JSON数组，解析后用逗号连接
+              const parsed = JSON.parse(ans.answer_text);
+              if (Array.isArray(parsed)) return parsed.join("、");
+              return ans.answer_text;
+            } catch {
+              return ans.answer_text;
+            }
+          }
+          return ans.answer_value !== null && ans.answer_value !== undefined
+            ? ans.answer_value
+            : "";
         });
 
         // 每题用时
@@ -643,6 +806,10 @@ app.get(
           Object.values(subAnswers).forEach((ans) => {
             const q = questionMap[ans.question_id];
             if (!q) return;
+            // 只有量表题才参与计分
+            if (q.question_type && q.question_type !== "scale") return;
+            if (ans.answer_value === null || ans.answer_value === undefined)
+              return;
             let score = ans.answer_value;
             if (q.is_reverse_scored) {
               score = q.max_score + q.min_score - ans.answer_value;
@@ -1255,6 +1422,383 @@ app.delete("/api/admins/:id", verifyAdminToken, async (req, res) => {
     res.json({ success: true, message: "账号已删除" });
   } catch (err) {
     console.error("删除账号失败:", err);
+    res.status(500).json({ success: false, message: "服务器错误" });
+  }
+});
+
+// 新增单道题目（管理端在线添加，不依赖Excel导入）
+app.post(
+  "/api/questionnaires/:id/questions",
+  verifyAdminToken,
+  async (req, res) => {
+    const questionnaireId = req.params.id;
+    const {
+      content,
+      question_type,
+      options,
+      min_score,
+      max_score,
+      role,
+      order_num,
+      is_reverse_scored,
+    } = req.body;
+
+    if (!content) {
+      return res
+        .status(400)
+        .json({ success: false, message: "题目内容不能为空" });
+    }
+
+    try {
+      const connection = await mysql.createConnection(dbConfig);
+
+      // 权限检查
+      const [qRows] = await connection.execute(
+        "SELECT * FROM questionnaires WHERE id = ?",
+        [questionnaireId],
+      );
+      if (qRows.length === 0) {
+        await connection.end();
+        return res.status(404).json({ success: false, message: "问卷不存在" });
+      }
+      if (
+        req.admin.role !== "supervisor" &&
+        qRows[0].created_by !== req.admin.adminId
+      ) {
+        await connection.end();
+        return res
+          .status(403)
+          .json({ success: false, message: "没有权限编辑此问卷" });
+      }
+
+      // 如果没有指定题号，自动排到最后
+      let finalOrderNum = order_num;
+      if (!finalOrderNum) {
+        const [maxRow] = await connection.execute(
+          "SELECT MAX(order_num) AS max_num FROM questions WHERE questionnaire_id = ?",
+          [questionnaireId],
+        );
+        finalOrderNum = (maxRow[0].max_num || 0) + 1;
+      }
+
+      const [result] = await connection.execute(
+        `INSERT INTO questions
+        (questionnaire_id, content, question_type, options, min_score, max_score, role, order_num, is_reverse_scored)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          questionnaireId,
+          content,
+          question_type || "scale",
+          options ? JSON.stringify(options) : null,
+          min_score || 1,
+          max_score || 5,
+          role || "student",
+          finalOrderNum,
+          is_reverse_scored ? 1 : 0,
+        ],
+      );
+      await connection.end();
+      res.json({ success: true, message: "题目添加成功", id: result.insertId });
+    } catch (err) {
+      console.error("添加题目失败:", err);
+      res.status(500).json({ success: false, message: "服务器错误" });
+    }
+  },
+);
+
+// 编辑单道题目
+app.put("/api/questions/:id", verifyAdminToken, async (req, res) => {
+  const questionId = req.params.id;
+  const {
+    content,
+    question_type,
+    options,
+    min_score,
+    max_score,
+    role,
+    is_reverse_scored,
+  } = req.body;
+
+  try {
+    const connection = await mysql.createConnection(dbConfig);
+    await connection.execute(
+      `UPDATE questions SET
+        content = ?, question_type = ?, options = ?,
+        min_score = ?, max_score = ?, role = ?, is_reverse_scored = ?
+       WHERE id = ?`,
+      [
+        content,
+        question_type || "scale",
+        options ? JSON.stringify(options) : null,
+        min_score || 1,
+        max_score || 5,
+        role || "student",
+        is_reverse_scored ? 1 : 0,
+        questionId,
+      ],
+    );
+    await connection.end();
+    res.json({ success: true, message: "题目更新成功" });
+  } catch (err) {
+    console.error("编辑题目失败:", err);
+    res.status(500).json({ success: false, message: "服务器错误" });
+  }
+});
+
+// 删除单道题目
+app.delete("/api/questions/:id", verifyAdminToken, async (req, res) => {
+  const questionId = req.params.id;
+  try {
+    const connection = await mysql.createConnection(dbConfig);
+    // 先删关联答案，再删题目
+    await connection.execute("DELETE FROM answers WHERE question_id = ?", [
+      questionId,
+    ]);
+    await connection.execute(
+      "DELETE FROM dimension_questions WHERE question_id = ?",
+      [questionId],
+    );
+    await connection.execute("DELETE FROM questions WHERE id = ?", [
+      questionId,
+    ]);
+    await connection.end();
+    res.json({ success: true, message: "题目已删除" });
+  } catch (err) {
+    console.error("删除题目失败:", err);
+    res.status(500).json({ success: false, message: "服务器错误" });
+  }
+});
+
+// 批量更新题目顺序（拖拽排序用）
+app.put(
+  "/api/questionnaires/:id/questions/reorder",
+  verifyAdminToken,
+  async (req, res) => {
+    const { orders } = req.body; // [{ id: 1, order_num: 1 }, { id: 3, order_num: 2 }, ...]
+
+    if (!Array.isArray(orders)) {
+      return res.status(400).json({ success: false, message: "参数格式错误" });
+    }
+
+    try {
+      const connection = await mysql.createConnection(dbConfig);
+      for (const item of orders) {
+        await connection.execute(
+          "UPDATE questions SET order_num = ? WHERE id = ?",
+          [item.order_num, item.id],
+        );
+      }
+      await connection.end();
+      res.json({ success: true, message: "顺序更新成功" });
+    } catch (err) {
+      console.error("更新顺序失败:", err);
+      res.status(500).json({ success: false, message: "服务器错误" });
+    }
+  },
+);
+
+// 获取某条提交记录的逐题答案详情
+app.get("/api/submissions/:id/answers", verifyAdminToken, async (req, res) => {
+  const submissionId = req.params.id;
+  try {
+    const connection = await mysql.createConnection(dbConfig);
+
+    // 获取提交记录和问卷信息
+    const [subRows] = await connection.execute(
+      "SELECT s.*, q.title AS questionnaire_title FROM submissions s JOIN questionnaires q ON s.questionnaire_id = q.id WHERE s.id = ?",
+      [submissionId],
+    );
+    if (subRows.length === 0) {
+      await connection.end();
+      return res
+        .status(404)
+        .json({ success: false, message: "提交记录不存在" });
+    }
+
+    // 获取逐题答案，连接题目信息
+    const [answers] = await connection.execute(
+      `SELECT a.*, q.content, q.question_type, q.order_num, q.min_score, q.max_score,
+              q.is_reverse_scored, q.options, q.role
+       FROM answers a
+       JOIN questions q ON a.question_id = q.id
+       WHERE a.submission_id = ?
+       ORDER BY q.order_num ASC`,
+      [submissionId],
+    );
+
+    await connection.end();
+
+    // 格式化答案显示
+    const formattedAnswers = answers.map((ans) => {
+      let displayValue = "";
+      if (
+        ans.answer_text !== null &&
+        ans.answer_text !== undefined &&
+        ans.answer_text !== ""
+      ) {
+        try {
+          const parsed = JSON.parse(ans.answer_text);
+          displayValue = Array.isArray(parsed)
+            ? parsed.join("、")
+            : ans.answer_text;
+        } catch {
+          displayValue = ans.answer_text;
+        }
+      } else if (ans.answer_value !== null) {
+        displayValue = String(ans.answer_value);
+      }
+
+      return {
+        order_num: ans.order_num,
+        content: ans.content,
+        question_type: ans.question_type || "scale",
+        role: ans.role || "student",
+        display_value: displayValue,
+        answer_value: ans.answer_value,
+        answer_text: ans.answer_text,
+        duration_ms: ans.duration_ms,
+      };
+    });
+
+    res.json({
+      success: true,
+      submission: subRows[0],
+      answers: formattedAnswers,
+    });
+  } catch (err) {
+    console.error("获取答案详情失败:", err);
+    res.status(500).json({ success: false, message: "服务器错误" });
+  }
+});
+
+// 获取某份问卷的分数段配置
+app.get(
+  "/api/questionnaires/:id/score-rules",
+  verifyAdminToken,
+  async (req, res) => {
+    const questionnaireId = req.params.id;
+    try {
+      const connection = await mysql.createConnection(dbConfig);
+      const [rules] = await connection.execute(
+        "SELECT * FROM score_rules WHERE questionnaire_id = ? ORDER BY min_score ASC",
+        [questionnaireId],
+      );
+      await connection.end();
+      res.json({ success: true, rules });
+    } catch (err) {
+      console.error("获取分数段配置失败:", err);
+      res.status(500).json({ success: false, message: "服务器错误" });
+    }
+  },
+);
+
+// 保存分数段配置（全量更新）
+app.post(
+  "/api/questionnaires/:id/score-rules",
+  verifyAdminToken,
+  async (req, res) => {
+    const questionnaireId = req.params.id;
+    const { rules } = req.body;
+
+    if (!Array.isArray(rules)) {
+      return res.status(400).json({ success: false, message: "参数格式错误" });
+    }
+
+    const connection = await mysql.createConnection(dbConfig);
+    try {
+      // 权限检查
+      const [qRows] = await connection.execute(
+        "SELECT * FROM questionnaires WHERE id = ?",
+        [questionnaireId],
+      );
+      if (qRows.length === 0) {
+        await connection.end();
+        return res.status(404).json({ success: false, message: "问卷不存在" });
+      }
+      if (
+        req.admin.role !== "supervisor" &&
+        qRows[0].created_by !== req.admin.adminId
+      ) {
+        await connection.end();
+        return res
+          .status(403)
+          .json({ success: false, message: "没有权限修改此问卷" });
+      }
+
+      // 全量更新：先删旧的再插新的
+      await connection.execute(
+        "DELETE FROM score_rules WHERE questionnaire_id = ?",
+        [questionnaireId],
+      );
+      for (const rule of rules) {
+        await connection.execute(
+          `INSERT INTO score_rules
+          (questionnaire_id, min_score, max_score, label, description, visible_to_subject)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+          [
+            questionnaireId,
+            rule.min_score,
+            rule.max_score,
+            rule.label,
+            rule.description || "",
+            rule.visible_to_subject ? 1 : 0,
+          ],
+        );
+      }
+      await connection.end();
+      res.json({ success: true, message: "分数段配置保存成功" });
+    } catch (err) {
+      await connection.end();
+      console.error("保存分数段配置失败:", err);
+      res.status(500).json({ success: false, message: "服务器错误" });
+    }
+  },
+);
+
+// 计算某次提交的分数段评价（用于回答记录详情展示）
+app.get("/api/submissions/:id/report", verifyAdminToken, async (req, res) => {
+  const submissionId = req.params.id;
+  try {
+    const connection = await mysql.createConnection(dbConfig);
+
+    const [subRows] = await connection.execute(
+      "SELECT * FROM submissions WHERE id = ?",
+      [submissionId],
+    );
+    if (subRows.length === 0) {
+      await connection.end();
+      return res
+        .status(404)
+        .json({ success: false, message: "提交记录不存在" });
+    }
+    const questionnaireId = subRows[0].questionnaire_id;
+
+    const { totalScore, dimensionScores } = await calcScore(
+      questionnaireId,
+      submissionId,
+      connection,
+    );
+
+    const [rules] = await connection.execute(
+      "SELECT * FROM score_rules WHERE questionnaire_id = ? ORDER BY min_score ASC",
+      [questionnaireId],
+    );
+    const matchedRule =
+      rules.find(
+        (r) =>
+          totalScore >= Number(r.min_score) &&
+          totalScore <= Number(r.max_score),
+      ) || null;
+
+    await connection.end();
+    res.json({
+      success: true,
+      total_score: totalScore,
+      dimension_scores: dimensionScores,
+      matched_rule: matchedRule,
+    });
+  } catch (err) {
+    console.error("获取报告失败:", err);
     res.status(500).json({ success: false, message: "服务器错误" });
   }
 });
