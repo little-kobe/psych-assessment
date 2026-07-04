@@ -11,6 +11,27 @@ const rules = ref([]);
 const loading = ref(true);
 const saving = ref(false);
 
+// 心理学常用分段预设（标签+颜色）
+const presets = [
+  { label: "正常", color: "#4CAF7D" },
+  { label: "轻度", color: "#8BC34A" },
+  { label: "中度", color: "#FFC107" },
+  { label: "中重度", color: "#FF9800" },
+  { label: "重度", color: "#F44336" },
+  { label: "优秀", color: "#2196F3" },
+  { label: "良好", color: "#4CAF7D" },
+  { label: "一般", color: "#9E9E9E" },
+  { label: "较差", color: "#FF9800" },
+  { label: "低焦虑", color: "#4CAF7D" },
+  { label: "中焦虑", color: "#FFC107" },
+  { label: "高焦虑", color: "#F44336" },
+];
+
+function applyPreset(rule, preset) {
+  rule.label = preset.label;
+  rule.color = preset.color;
+}
+
 async function fetchRules() {
   const token = localStorage.getItem("admin_token");
   try {
@@ -24,6 +45,7 @@ async function fetchRules() {
         ...r,
         visible_to_subject:
           r.visible_to_subject === 1 || r.visible_to_subject === true,
+        color: r.color || "#4CAF7D",
       }));
   } catch (err) {
     ElMessage.error("加载失败");
@@ -39,6 +61,7 @@ function addRule() {
     label: "",
     description: "",
     visible_to_subject: false,
+    color: "#4CAF7D",
   });
 }
 
@@ -152,11 +175,55 @@ onMounted(fetchRules);
           </el-form-item>
 
           <el-form-item label="分段标签">
-            <el-input
-              v-model="rule.label"
-              placeholder="如：轻度、中度、正常范围、优秀"
-              style="max-width: 260px"
-            />
+            <div
+              style="
+                display: flex;
+                flex-direction: column;
+                gap: 10px;
+                width: 100%;
+              "
+            >
+              <!-- 预设快速选择 -->
+              <div class="preset-row">
+                <span style="font-size: 12px; color: #999; margin-right: 8px"
+                  >预设：</span
+                >
+                <span
+                  v-for="p in presets"
+                  :key="p.label"
+                  class="preset-tag"
+                  :style="{
+                    background: p.color + '22',
+                    color: p.color,
+                    borderColor: p.color + '66',
+                  }"
+                  @click="applyPreset(rule, p)"
+                  >{{ p.label }}</span
+                >
+              </div>
+
+              <!-- 自定义标签名+颜色 -->
+              <div style="display: flex; align-items: center; gap: 10px">
+                <el-input
+                  v-model="rule.label"
+                  placeholder="自定义标签名"
+                  style="max-width: 180px"
+                />
+                <span style="font-size: 13px; color: #888">颜色：</span>
+                <el-color-picker v-model="rule.color" show-alpha />
+                <!-- 预览效果 -->
+                <span
+                  v-if="rule.label"
+                  class="label-preview"
+                  :style="{
+                    background: (rule.color || '#4CAF7D') + '22',
+                    color: rule.color || '#4CAF7D',
+                    borderColor: (rule.color || '#4CAF7D') + '66',
+                  }"
+                  >{{ rule.label }}</span
+                >
+              </div>
+            </div>
           </el-form-item>
 
           <el-form-item label="评价描述">
@@ -182,6 +249,31 @@ onMounted(fetchRules);
 </template>
 
 <style scoped>
+.preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.preset-tag {
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  border: 1px solid;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.preset-tag:hover {
+  opacity: 0.75;
+}
+.label-preview {
+  padding: 3px 14px;
+  border-radius: 14px;
+  font-size: 13px;
+  font-weight: 600;
+  border: 1px solid;
+}
+
 .container {
   max-width: 760px;
   margin: 20px auto;

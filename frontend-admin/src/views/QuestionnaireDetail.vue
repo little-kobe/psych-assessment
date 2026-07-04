@@ -18,6 +18,7 @@ const exporting = ref(false);
 const showEditDialog = ref(false);
 const saving = ref(false);
 const activeTab = ref("questions"); // questions 或 submissions
+const reportDetail = ref(null);
 
 const editForm = ref({
   title: "",
@@ -95,23 +96,22 @@ async function viewAnswers(submissionId) {
   answerLoading.value = true;
   showAnswerDialog.value = true;
   answerDetail.value = null;
+  reportDetail.value = null;
   const token = localStorage.getItem("admin_token");
-  const reportDetail = ref(null);
   try {
-    const token = localStorage.getItem("admin_token");
-    const [ansRes, reportRes] = await Promise.all([
-      fetch(`http://localhost:3000/api/submissions/${submissionId}/answers`, {
-        headers: { Authorization: `Bearer ${token}` },
-      }),
-      fetch(`http://localhost:3000/api/submissions/${submissionId}/report`, {
-        headers: { Authorization: `Bearer ${token}` },
-      }),
-    ]);
+    const ansRes = await fetch(
+      `http://localhost:3000/api/submissions/${submissionId}/answers`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
     const ansData = await ansRes.json();
-    const reportData = await reportRes.json();
     if (ansData.success) answerDetail.value = ansData;
+
+    const reportRes = await fetch(
+      `http://localhost:3000/api/submissions/${submissionId}/report`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+    const reportData = await reportRes.json();
     if (reportData.success) reportDetail.value = reportData;
-    else reportDetail.value = null;
   } catch (err) {
     ElMessage.error("加载失败");
   } finally {
@@ -527,14 +527,18 @@ onMounted(fetchDetail);
             <div class="report-score">
               总分：<strong>{{ reportDetail.total_score }}</strong> 分
             </div>
-            <div
-              class="report-label"
-              :class="
-                reportDetail.matched_rule.visible_to_subject
-                  ? 'visible'
-                  : 'admin-only'
-              "
-            >
+            <div class="report-label-row">
+              <span
+                class="report-label-badge"
+                :style="{
+                  background:
+                    (reportDetail.matched_rule.color || '#4CAF7D') + '22',
+                  color: reportDetail.matched_rule.color || '#4CAF7D',
+                  borderColor:
+                    (reportDetail.matched_rule.color || '#4CAF7D') + '66',
+                }"
+                >{{ reportDetail.matched_rule.label }}</span
+              >
               <el-tag
                 :type="
                   reportDetail.matched_rule.visible_to_subject
@@ -542,20 +546,16 @@ onMounted(fetchDetail);
                     : 'warning'
                 "
                 size="small"
-              >
-                {{
+                >{{
                   reportDetail.matched_rule.visible_to_subject
                     ? "受测者可见"
                     : "仅管理员可见"
-                }}
-              </el-tag>
-              <span class="label-text">{{
-                reportDetail.matched_rule.label
-              }}</span>
+                }}</el-tag
+              >
             </div>
             <div
               v-if="reportDetail.matched_rule.description"
-              class="report-desc"
+              class="report-desc-box"
             >
               {{ reportDetail.matched_rule.description }}
             </div>
@@ -624,6 +624,30 @@ onMounted(fetchDetail);
 </template>
 
 <style scoped>
+.report-label-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0;
+}
+.report-label-badge {
+  padding: 4px 16px;
+  border-radius: 16px;
+  font-size: 15px;
+  font-weight: 600;
+  border: 1px solid;
+}
+.report-desc-box {
+  font-size: 13px;
+  color: #5a7a64;
+  line-height: 1.7;
+  background: #f4fbf6;
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-top: 8px;
+  border-left: 3px solid #4caf7d;
+}
+
 .answer-meta {
   display: flex;
   flex-wrap: wrap;

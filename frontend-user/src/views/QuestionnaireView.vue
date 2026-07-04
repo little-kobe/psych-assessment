@@ -560,10 +560,20 @@ async function submitQuestionnaire() {
         <div v-if="subjectReport" class="subject-report">
           <div class="report-divider"></div>
           <p class="report-title">测评结果</p>
-          <div class="report-label-badge">{{ subjectReport.label }}</div>
-          <p v-if="subjectReport.description" class="report-desc">
+          <div
+            class="report-label-badge"
+            :style="{
+              background: (subjectReport.color || '#4CAF7D') + '22',
+              color: subjectReport.color || '#4CAF7D',
+              border:
+                '1.5px solid ' + (subjectReport.color || '#4CAF7D') + '88',
+            }"
+          >
+            {{ subjectReport.label }}
+          </div>
+          <div v-if="subjectReport.description" class="report-desc-box">
             {{ subjectReport.description }}
-          </p>
+          </div>
         </div>
       </div>
     </div>
@@ -571,6 +581,27 @@ async function submitQuestionnaire() {
 </template>
 
 <style scoped>
+.report-label-badge {
+  display: block;
+  text-align: center;
+  padding: 8px 24px;
+  border-radius: 20px;
+  font-size: 17px;
+  font-weight: 600;
+  margin: 0 auto 14px;
+  width: fit-content;
+}
+.report-desc-box {
+  font-size: 13px;
+  color: #5a7a64;
+  line-height: 1.7;
+  background: #f4fbf6;
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin: 0;
+  border-left: 3px solid #4caf7d;
+}
+
 .page {
   position: relative;
   min-height: 100vh;

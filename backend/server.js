@@ -118,7 +118,6 @@ async function calcScore(questionnaireId, submissionId, connection) {
   }
 
   totalScore = Math.round(totalScore * 100) / 100;
-
   return { totalScore, dimensionScores, questionMap, scoredAnswers };
 }
 
@@ -1733,8 +1732,8 @@ app.post(
       for (const rule of rules) {
         await connection.execute(
           `INSERT INTO score_rules
-          (questionnaire_id, min_score, max_score, label, description, visible_to_subject)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+    (questionnaire_id, min_score, max_score, label, description, visible_to_subject, color)
+   VALUES (?, ?, ?, ?, ?, ?, ?)`,
           [
             questionnaireId,
             rule.min_score,
@@ -1742,6 +1741,7 @@ app.post(
             rule.label,
             rule.description || "",
             rule.visible_to_subject ? 1 : 0,
+            rule.color || "#4CAF7D",
           ],
         );
       }
