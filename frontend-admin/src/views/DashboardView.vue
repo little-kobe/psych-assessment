@@ -64,16 +64,33 @@ async function createQuestionnaire() {
   }
 }
 
-function copyLink(questionnaireId) {
-  // 用户端地址，本地开发时是5173端口，部署后换成真实域名
-  const link = `http://localhost:5173/q/${questionnaireId}`;
+const showGroupDialog = ref(false);
+const currentLinkQid = ref(null);
+const groupName = ref("");
+const generatedLink = ref("");
+
+function openGroupLink(questionnaireId) {
+  currentLinkQid.value = questionnaireId;
+  groupName.value = "";
+  generatedLink.value = `http://localhost:5173/q/${questionnaireId}`;
+  showGroupDialog.value = true;
+}
+
+function generateGroupLink() {
+  const base = `http://localhost:5173/q/${currentLinkQid.value}`;
+  generatedLink.value = groupName.value
+    ? `${base}?group=${encodeURIComponent(groupName.value)}`
+    : base;
+}
+
+function copyGeneratedLink() {
   navigator.clipboard
-    .writeText(link)
+    .writeText(generatedLink.value)
     .then(() => {
-      ElMessage.success("链接已复制，可直接发给受测者");
+      ElMessage.success("链接已复制");
     })
     .catch(() => {
-      ElMessage.error("复制失败，请手动复制：" + link);
+      ElMessage.error("复制失败，请手动复制");
     });
 }
 
@@ -187,8 +204,9 @@ const roleLabel = () => (role.value === "supervisor" ? "导师" : "研究者");
                   size="small"
                   type="success"
                   plain
-                  @click="copyLink(scope.row.id)"
-                  >复制链接</el-button
+                  @click="openGroupLink(scope.row.id)"
+                  >生成链接</el-button
+                >
                 >
                 <el-button size="small" @click="goImport(scope.row.id)"
                   >导入题目</el-button
@@ -231,6 +249,46 @@ const roleLabel = () => (role.value === "supervisor" ? "导师" : "研究者");
             <el-button type="primary" @click="createQuestionnaire"
               >确认创建</el-button
             >
+          </template>
+        </el-dialog>
+        <!-- 生成分组链接弹窗 -->
+        <el-dialog v-model="showGroupDialog" title="生成问卷链接" width="460px">
+          <div class="link-dialog">
+            <p class="link-hint">
+              可以为不同群体生成带分组标记的链接，方便数据分析时做组间比较。
+            </p>
+
+            <el-form label-width="80px">
+              <el-form-item label="分组名称">
+                <el-input
+                  v-model="groupName"
+                  placeholder="如：A班、实验组、男生组（不填则为无分组）"
+                  @input="generateGroupLink"
+                  clearable
+                />
+              </el-form-item>
+            </el-form>
+
+            <div class="link-preview">
+              <div class="link-label">生成的链接：</div>
+              <div class="link-text">{{ generatedLink }}</div>
+              <el-button size="small" type="primary" @click="copyGeneratedLink"
+                >复制链接</el-button
+              >
+            </div>
+
+            <div class="link-tips">
+              <p>💡 使用建议：</p>
+              <ul>
+                <li>给A班同学发：<code>...?group=A班</code></li>
+                <li>给B班同学发：<code>...?group=B班</code></li>
+                <li>导出数据时，每条记录会自动带上对应的分组标签</li>
+              </ul>
+            </div>
+          </div>
+
+          <template #footer>
+            <el-button @click="showGroupDialog = false">关闭</el-button>
           </template>
         </el-dialog>
       </el-main>
@@ -306,5 +364,56 @@ const roleLabel = () => (role.value === "supervisor" ? "导师" : "研究者");
   margin: 0;
   font-size: 18px;
   color: #3d2b12;
+}
+.link-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.link-hint {
+  font-size: 13px;
+  color: #888;
+  margin: 0;
+}
+.link-preview {
+  background: #f9f9f9;
+  border-radius: 8px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.link-label {
+  font-size: 12px;
+  color: #999;
+}
+.link-text {
+  font-size: 13px;
+  color: #3d2b12;
+  word-break: break-all;
+  background: white;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid #eee;
+}
+.link-tips {
+  font-size: 12px;
+  color: #999;
+}
+.link-tips p {
+  margin: 0 0 4px;
+}
+.link-tips ul {
+  margin: 0;
+  padding-left: 16px;
+}
+.link-tips li {
+  margin-bottom: 4px;
+}
+.link-tips code {
+  background: #f0f0f0;
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: #666;
 }
 </style>

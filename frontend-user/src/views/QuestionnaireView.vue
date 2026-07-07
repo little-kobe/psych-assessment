@@ -4,6 +4,7 @@ import { useRoute } from "vue-router";
 
 const route = useRoute();
 const questionnaireId = Number(route.params.id) || 1;
+const groupLabel = route.query.group || null; // 从链接参数读取分组标记
 const questionnaire = ref(null);
 const allQuestions = ref([]);
 const submitted = ref(false);
@@ -265,6 +266,7 @@ async function submitQuestionnaire() {
     body: JSON.stringify({
       questionnaire_id: questionnaireId,
       tracking_code: trackingCode.value || null,
+      group_label: groupLabel,
       started_at: new Date(overallStartTime.value)
         .toISOString()
         .slice(0, 19)

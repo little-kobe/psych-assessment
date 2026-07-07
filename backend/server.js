@@ -261,15 +261,27 @@ app.get("/api/questionnaire/:id", async (req, res) => {
 
 // 接收整份问卷的提交
 app.post("/api/submission", async (req, res) => {
-  const { questionnaire_id, started_at, finished_at, answers, tracking_code } =
-    req.body;
+  const {
+    questionnaire_id,
+    started_at,
+    finished_at,
+    answers,
+    tracking_code,
+    group_label,
+  } = req.body;
 
   const connection = await mysql.createConnection(dbConfig);
 
   try {
     const [submissionResult] = await connection.execute(
-      "INSERT INTO submissions (questionnaire_id, started_at, finished_at, tracking_code) VALUES (?, ?, ?, ?)",
-      [questionnaire_id, started_at, finished_at, tracking_code || null],
+      "INSERT INTO submissions (questionnaire_id, started_at, finished_at, tracking_code, group_label) VALUES (?, ?, ?, ?, ?)",
+      [
+        questionnaire_id,
+        started_at,
+        finished_at,
+        tracking_code || null,
+        group_label || null,
+      ],
     );
     const submissionId = submissionResult.insertId;
 
@@ -701,6 +713,7 @@ app.get(
       const fixedHeaders = [
         "提交ID",
         "追踪码",
+        "分组",
         ...infoHeaders,
         "开始时间",
         "完成时间",
@@ -786,6 +799,7 @@ app.get(
         const fixedCols = [
           sub.id,
           sub.tracking_code || "",
+          sub.group_label || "",
           ...infoCols,
           sub.started_at
             ? new Date(sub.started_at).toLocaleString("zh-CN")

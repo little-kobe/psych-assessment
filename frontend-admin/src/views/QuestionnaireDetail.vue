@@ -413,6 +413,18 @@ onMounted(fetchDetail);
           <div v-loading="submissionsLoading">
             <el-table :data="submissions" v-if="submissions.length > 0">
               <el-table-column prop="id" label="编号" width="70" />
+              <el-table-column label="分组" width="100">
+                <template #default="scope">
+                  <el-tag
+                    v-if="scope.row.group_label"
+                    size="small"
+                    type="primary"
+                  >
+                    {{ scope.row.group_label }}
+                  </el-tag>
+                  <span v-else style="color: #ccc; font-size: 12px">无</span>
+                </template>
+              </el-table-column>
               <el-table-column label="提交时间" width="170">
                 <template #default="scope">
                   {{ formatTime(scope.row.finished_at) }}
