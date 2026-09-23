@@ -19,6 +19,7 @@ const infoFields = ref([]); // 需要收集的字段配置
 const infoAnswers = ref({}); // 受测者填写的基本信息
 const infoSubmitted = ref(false); // 基本信息是否已提交
 const submissionId = ref(null); // 提交后拿到的submission_id，用于关联基本信息
+const showDesc = ref(false); // 答题页是否展开问卷说明
 
 // 分角色分组
 const studentQuestions = computed(() =>
@@ -376,6 +377,11 @@ async function submitQuestionnaire() {
           <h2>{{ questionnaire.title }}</h2>
           <p class="consent-subtitle">参与前请阅读以下说明</p>
         </div>
+        <!-- 问卷说明 -->
+        <div v-if="questionnaire.description" class="desc-box">
+          <p class="desc-title">问卷说明</p>
+          <p class="desc-text">{{ questionnaire.description }}</p>
+        </div>
         <div class="consent-body">
           <p class="consent-text">
             {{
@@ -516,6 +522,17 @@ async function submitQuestionnaire() {
 
         <div class="quiz-header">
           <h1>{{ questionnaire.title }}</h1>
+          <!-- 答题过程中也能随时查看问卷说明 -->
+          <button
+            v-if="questionnaire.description"
+            class="desc-toggle"
+            @click="showDesc = !showDesc"
+          >
+            {{ showDesc ? "收起作答说明 ▴" : "查看作答说明 ▾" }}
+          </button>
+          <p v-if="showDesc" class="desc-text quiz-desc">
+            {{ questionnaire.description }}
+          </p>
         </div>
 
         <div class="progress-track">
@@ -715,6 +732,42 @@ async function submitQuestionnaire() {
 </template>
 
 <style scoped>
+/* 问卷说明 */
+.desc-box {
+  background: #fffdf5;
+  border: 1px solid #f3e6c4;
+  border-radius: 12px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+.desc-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #8b6b2e;
+  margin: 0 0 6px;
+}
+.desc-text {
+  font-size: 13px;
+  color: #5a4a2e;
+  line-height: 1.8;
+  margin: 0;
+  white-space: pre-wrap; /* 保留说明里的换行 */
+}
+.desc-toggle {
+  background: none;
+  border: none;
+  padding: 4px 0;
+  font-size: 12px;
+  color: #4caf7d;
+  cursor: pointer;
+}
+.quiz-desc {
+  background: #fffdf5;
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin: 6px 0 10px;
+  text-align: left;
+}
 .report-label-badge {
   display: block;
   text-align: center;
