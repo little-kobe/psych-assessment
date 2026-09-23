@@ -287,12 +287,19 @@ app.get("/api/questionnaire/:id", async (req, res) => {
       [questionnaireId],
     );
 
+    // 板块引导语
+    const [sectionRows] = await connection.execute(
+      "SELECT id, title, intro FROM question_sections WHERE questionnaire_id = ?",
+      [questionnaireId],
+    );
+
     await connection.end();
 
     res.json({
       success: true,
       questionnaire,
       questions: questionRows,
+      sections: sectionRows,
     });
   } catch (err) {
     console.error("获取问卷失败:", err);
@@ -638,9 +645,20 @@ app.get("/api/questionnaires/:id", verifyAdminToken, async (req, res) => {
       [questionnaireId],
     );
 
+    // 板块引导语
+    const [sectionRows] = await connection.execute(
+      "SELECT * FROM question_sections WHERE questionnaire_id = ? ORDER BY id ASC",
+      [questionnaireId],
+    );
+
     await connection.end();
 
-    res.json({ success: true, questionnaire, questions: questionRows });
+    res.json({
+      success: true,
+      questionnaire,
+      questions: questionRows,
+      sections: sectionRows,
+    });
   } catch (err) {
     console.error("获取问卷详情失败:", err);
     res.status(500).json({ success: false, message: "服务器错误" });
@@ -1527,6 +1545,7 @@ app.post(
       role,
       order_num,
       is_reverse_scored,
+      section_id,
     } = req.body;
 
     if (!content) {
@@ -1569,8 +1588,8 @@ app.post(
 
       const [result] = await connection.execute(
         `INSERT INTO questions
-        (questionnaire_id, content, question_type, options, min_score, max_score, role, order_num, is_reverse_scored)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (questionnaire_id, content, question_type, options, min_score, max_score, role, order_num, is_reverse_scored, section_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           questionnaireId,
           content,
@@ -1581,6 +1600,7 @@ app.post(
           role || "student",
           finalOrderNum,
           is_reverse_scored ? 1 : 0,
+          section_id || null,
         ],
       );
       await connection.end();
@@ -1603,6 +1623,7 @@ app.put("/api/questions/:id", verifyAdminToken, async (req, res) => {
     max_score,
     role,
     is_reverse_scored,
+    section_id,
   } = req.body;
 
   try {
@@ -1610,7 +1631,7 @@ app.put("/api/questions/:id", verifyAdminToken, async (req, res) => {
     await connection.execute(
       `UPDATE questions SET
         content = ?, question_type = ?, options = ?,
-        min_score = ?, max_score = ?, role = ?, is_reverse_scored = ?
+        min_score = ?, max_score = ?, role = ?, is_reverse_scored = ?, section_id = ?
        WHERE id = ?`,
       [
         content,
@@ -1620,6 +1641,7 @@ app.put("/api/questions/:id", verifyAdminToken, async (req, res) => {
         max_score ?? 5,
         role || "student",
         is_reverse_scored ? 1 : 0,
+        section_id || null,
         questionId,
       ],
     );
@@ -2024,6 +2046,173 @@ app.get(
     }
   },
 );
+
+// ========== 板块引导语（一组题共用一个大标题和说明） ==========
+
+// 检查当前账号能不能修改这份问卷：返回 "ok" / "notfound" / "forbidden"
+async function checkQuestionnaireAccess(connection, questionnaireId, admin) {
+  const [rows] = await connection.execute(
+    "SELECT created_by FROM questionnaires WHERE id = ?",
+    [questionnaireId],
+  );
+  if (rows.length === 0) return "notfound";
+  if (admin.role !== "supervisor" && rows[0].created_by !== admin.adminId) {
+    return "forbidden";
+  }
+  return "ok";
+}
+
+// 把第 from 到第 to 题划进某个板块（先清空这个板块原来的题）
+async function assignSectionRange(
+  connection,
+  questionnaireId,
+  sectionId,
+  from,
+  to,
+) {
+  await connection.execute(
+    "UPDATE questions SET section_id = NULL WHERE section_id = ?",
+    [sectionId],
+  );
+  if (from && to) {
+    await connection.execute(
+      "UPDATE questions SET section_id = ? WHERE questionnaire_id = ? AND order_num BETWEEN ? AND ?",
+      [sectionId, questionnaireId, Math.min(from, to), Math.max(from, to)],
+    );
+  }
+}
+
+// 新建板块：{ title, intro, from, to }，from/to 是题号范围（可不填）
+app.post(
+  "/api/questionnaires/:id/sections",
+  verifyAdminToken,
+  async (req, res) => {
+    const questionnaireId = req.params.id;
+    const { title, intro, from, to } = req.body;
+    if (!title) {
+      return res
+        .status(400)
+        .json({ success: false, message: "板块标题不能为空" });
+    }
+    const connection = await mysql.createConnection(dbConfig);
+    try {
+      const access = await checkQuestionnaireAccess(
+        connection,
+        questionnaireId,
+        req.admin,
+      );
+      if (access !== "ok") {
+        await connection.end();
+        return res.status(access === "notfound" ? 404 : 403).json({
+          success: false,
+          message: access === "notfound" ? "问卷不存在" : "没有权限修改此问卷",
+        });
+      }
+      const [result] = await connection.execute(
+        "INSERT INTO question_sections (questionnaire_id, title, intro) VALUES (?, ?, ?)",
+        [questionnaireId, title, intro || ""],
+      );
+      await assignSectionRange(
+        connection,
+        questionnaireId,
+        result.insertId,
+        from,
+        to,
+      );
+      await connection.end();
+      res.json({ success: true, message: "板块已创建", id: result.insertId });
+    } catch (err) {
+      await connection.end();
+      console.error("创建板块失败:", err);
+      res.status(500).json({ success: false, message: "服务器错误" });
+    }
+  },
+);
+
+// 修改板块（标题、引导语、题号范围）
+app.put("/api/sections/:id", verifyAdminToken, async (req, res) => {
+  const { title, intro, from, to } = req.body;
+  if (!title) {
+    return res
+      .status(400)
+      .json({ success: false, message: "板块标题不能为空" });
+  }
+  const connection = await mysql.createConnection(dbConfig);
+  try {
+    const [rows] = await connection.execute(
+      "SELECT * FROM question_sections WHERE id = ?",
+      [req.params.id],
+    );
+    if (rows.length === 0) {
+      await connection.end();
+      return res.status(404).json({ success: false, message: "板块不存在" });
+    }
+    const questionnaireId = rows[0].questionnaire_id;
+    const access = await checkQuestionnaireAccess(
+      connection,
+      questionnaireId,
+      req.admin,
+    );
+    if (access !== "ok") {
+      await connection.end();
+      return res
+        .status(403)
+        .json({ success: false, message: "没有权限修改此问卷" });
+    }
+    await connection.execute(
+      "UPDATE question_sections SET title = ?, intro = ? WHERE id = ?",
+      [title, intro || "", req.params.id],
+    );
+    await assignSectionRange(
+      connection,
+      questionnaireId,
+      req.params.id,
+      from,
+      to,
+    );
+    await connection.end();
+    res.json({ success: true, message: "板块已更新" });
+  } catch (err) {
+    await connection.end();
+    console.error("修改板块失败:", err);
+    res.status(500).json({ success: false, message: "服务器错误" });
+  }
+});
+
+// 删除板块（题目不会被删，只是不再属于这个板块）
+app.delete("/api/sections/:id", verifyAdminToken, async (req, res) => {
+  const connection = await mysql.createConnection(dbConfig);
+  try {
+    const [rows] = await connection.execute(
+      "SELECT * FROM question_sections WHERE id = ?",
+      [req.params.id],
+    );
+    if (rows.length === 0) {
+      await connection.end();
+      return res.status(404).json({ success: false, message: "板块不存在" });
+    }
+    const access = await checkQuestionnaireAccess(
+      connection,
+      rows[0].questionnaire_id,
+      req.admin,
+    );
+    if (access !== "ok") {
+      await connection.end();
+      return res
+        .status(403)
+        .json({ success: false, message: "没有权限修改此问卷" });
+    }
+    await connection.execute("DELETE FROM question_sections WHERE id = ?", [
+      req.params.id,
+    ]);
+    await connection.end();
+    res.json({ success: true, message: "板块已删除" });
+  } catch (err) {
+    await connection.end();
+    console.error("删除板块失败:", err);
+    res.status(500).json({ success: false, message: "服务器错误" });
+  }
+});
 
 // ========== 选项模板（常用回答选项，如「完全没有=1 … 重度=5」） ==========
 

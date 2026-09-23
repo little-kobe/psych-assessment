@@ -8,6 +8,7 @@ const questionnaireId = Number(route.params.id) || 1;
 const groupLabel = route.query.group || null; // 从链接参数读取分组标记
 const questionnaire = ref(null);
 const allQuestions = ref([]);
+const sections = ref([]); // 板块引导语
 const submitted = ref(false);
 const consented = ref(false);
 const loading = ref(true);
@@ -64,6 +65,12 @@ const progressPercent = computed(() => {
       : studentQuestions.value.length + currentIndex.value;
   return Math.round((done / total) * 100);
 });
+// 当前题所属的板块（有的话，题目上方显示板块标题和引导语）
+const currentSection = computed(() => {
+  const sid = currentQuestion.value?.section_id;
+  return sid ? sections.value.find((s) => s.id === sid) || null : null;
+});
+
 const isLastQuestion = computed(
   () => currentIndex.value === currentQuestions.value.length - 1,
 );
@@ -113,6 +120,7 @@ onMounted(async () => {
     if (data.success) {
       questionnaire.value = data.questionnaire;
       allQuestions.value = data.questions;
+      sections.value = data.sections || [];
       // 拉取基本信息字段配置
       try {
         const infoRes = await fetch(
@@ -580,6 +588,13 @@ async function submitQuestionnaire() {
         </p>
 
         <div class="question-area" v-if="currentQuestion">
+          <!-- 板块标题和引导语 -->
+          <div v-if="currentSection" class="section-box">
+            <p class="section-title">{{ currentSection.title }}</p>
+            <p v-if="currentSection.intro" class="section-intro">
+              {{ currentSection.intro }}
+            </p>
+          </div>
           <p class="question-text">{{ currentQuestion.content }}</p>
 
           <!-- 量表题 -->
@@ -777,6 +792,27 @@ async function submitQuestionnaire() {
 </template>
 
 <style scoped>
+/* 板块引导语 */
+.section-box {
+  background: #f4fbf6;
+  border-left: 3px solid #4caf7d;
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+}
+.section-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #2e4a38;
+  margin: 0;
+}
+.section-intro {
+  font-size: 13px;
+  color: #5a7a64;
+  line-height: 1.7;
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+}
 /* 问卷说明 */
 .desc-box {
   background: #fffdf5;

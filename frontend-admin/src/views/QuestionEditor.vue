@@ -13,6 +13,7 @@ const showDialog = ref(false);
 const saving = ref(false);
 const editingId = ref(null); // null表示新增，有值表示编辑
 const inheritedFrom = ref(null); // 新增题目时沿用了第几题的设置
+const sections = ref([]); // 板块引导语列表
 
 const defaultForm = () => ({
   content: "",
@@ -23,6 +24,7 @@ const defaultForm = () => ({
   max_score: 5,
   role: "student",
   is_reverse_scored: false,
+  section_id: null, // 所属板块
 });
 
 const form = ref(defaultForm());
@@ -277,7 +279,10 @@ async function fetchQuestions() {
       },
     );
     const data = await res.json();
-    if (data.success) questions.value = data.questions;
+    if (data.success) {
+      questions.value = data.questions;
+      sections.value = data.sections || [];
+    }
   } catch (err) {
     ElMessage.error("加载题目失败");
   } finally {
@@ -304,6 +309,7 @@ function formFromQuestion(q) {
     max_score: q.max_score,
     role: q.role || "student",
     is_reverse_scored: !!q.is_reverse_scored,
+    section_id: q.section_id || null,
   };
 }
 
@@ -372,6 +378,7 @@ async function saveQuestion() {
     max_score: form.value.max_score,
     role: form.value.role,
     is_reverse_scored: form.value.is_reverse_scored,
+    section_id: form.value.section_id,
   };
   // 带分值的单选题：分值范围取选项里的最低分和最高分（反向计分要用）
   if (form.value.question_type === "single_choice") {
@@ -535,6 +542,107 @@ function removeOption(index) {
   form.value.options.splice(index, 1);
 }
 
+// ---------- 板块引导语 ----------
+
+const showSectionDialog = ref(false);
+const editingSectionId = ref(null);
+const sectionForm = ref({ title: "", intro: "", from: null, to: null });
+
+// 某个板块包含的题号范围，如「第 1-5 题」
+function sectionRange(sec) {
+  const nums = questions.value
+    .filter((q) => q.section_id === sec.id)
+    .map((q) => q.order_num);
+  if (nums.length === 0)
+    return { from: null, to: null, text: "还没有分配题目" };
+  const from = Math.min(...nums);
+  const to = Math.max(...nums);
+  const text =
+    from === to ? `第 ${from} 题` : `第 ${from}-${to} 题，共 ${nums.length} 题`;
+  return { from, to, text };
+}
+
+function sectionTitle(sectionId) {
+  const sec = sections.value.find((s) => s.id === sectionId);
+  return sec ? sec.title : "";
+}
+
+// 题目列表里，某题是不是一个板块的第一题（用来显示板块分隔条）
+function isSectionStart(index) {
+  const q = questions.value[index];
+  if (!q.section_id) return false;
+  return index === 0 || questions.value[index - 1].section_id !== q.section_id;
+}
+
+function openAddSection() {
+  editingSectionId.value = null;
+  sectionForm.value = { title: "", intro: "", from: null, to: null };
+  showSectionDialog.value = true;
+}
+
+function openEditSection(sec) {
+  editingSectionId.value = sec.id;
+  const range = sectionRange(sec);
+  sectionForm.value = {
+    title: sec.title,
+    intro: sec.intro || "",
+    from: range.from,
+    to: range.to,
+  };
+  showSectionDialog.value = true;
+}
+
+async function saveSection() {
+  if (!sectionForm.value.title.trim()) {
+    ElMessage.warning("板块标题不能为空");
+    return;
+  }
+  const token = localStorage.getItem("admin_token");
+  const url = editingSectionId.value
+    ? `http://localhost:3000/api/sections/${editingSectionId.value}`
+    : `http://localhost:3000/api/questionnaires/${questionnaireId}/sections`;
+  const res = await fetch(url, {
+    method: editingSectionId.value ? "PUT" : "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(sectionForm.value),
+  });
+  const data = await res.json();
+  if (data.success) {
+    ElMessage.success(data.message);
+    showSectionDialog.value = false;
+    fetchQuestions();
+  } else {
+    ElMessage.error(data.message);
+  }
+}
+
+async function deleteSection(sec) {
+  try {
+    await ElMessageBox.confirm(
+      `确认删除板块「${sec.title}」？题目不会被删除，只是不再显示这段引导语。`,
+      "删除板块",
+      { type: "warning" },
+    );
+  } catch {
+    return;
+  }
+  const token = localStorage.getItem("admin_token");
+  const res = await fetch(`http://localhost:3000/api/sections/${sec.id}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await res.json();
+  if (data.success) {
+    ElMessage.success("板块已删除");
+    fetchQuestions();
+  } else {
+    ElMessage.error(data.message);
+  }
+}
+
 function typeLabel(type) {
   const map = {
     scale: "量表",
@@ -569,7 +677,10 @@ onMounted(() => {
 
     <div class="header">
       <h2>题目编辑</h2>
-      <el-button type="primary" @click="openAdd">添加题目</el-button>
+      <div>
+        <el-button @click="openAddSection">添加板块引导语</el-button>
+        <el-button type="primary" @click="openAdd">添加题目</el-button>
+      </div>
     </div>
 
     <el-alert
@@ -584,74 +695,99 @@ onMounted(() => {
       <el-empty description="还没有题目，点击右上角添加第一道题" />
     </div>
 
-    <div class="question-list">
-      <el-card v-for="(q, index) in questions" :key="q.id" class="q-card">
-        <div class="q-row">
-          <div class="q-order">{{ q.order_num }}</div>
-          <div class="q-main">
-            <div class="q-content">{{ q.content }}</div>
-            <div class="q-tags">
-              <el-tag size="small" type="primary">{{
-                typeLabel(q.question_type || "scale")
-              }}</el-tag>
-              <el-tag size="small" :type="roleTagType(q.role || 'student')">{{
-                roleLabel(q.role || "student")
-              }}</el-tag>
-              <el-tag v-if="q.is_reverse_scored" size="small" type="warning"
-                >反向计分</el-tag
-              >
-              <span v-if="q.question_type === 'scale'" class="q-range"
-                >{{ q.min_score }}-{{ q.max_score }}分</span
-              >
-              <span v-if="formatOptions(q)" class="q-range">
-                {{ formatOptions(q) }}
-              </span>
-            </div>
+    <!-- 板块引导语列表 -->
+    <div v-if="sections.length > 0" class="section-panel">
+      <div class="section-panel-title">板块引导语</div>
+      <div v-for="sec in sections" :key="sec.id" class="section-item">
+        <div class="section-item-main">
+          <div class="section-item-title">{{ sec.title }}</div>
+          <div class="section-item-intro">
+            {{ sec.intro || "（无引导语）" }}
           </div>
-          <div class="q-actions">
-            <!-- 直接输入序号调整位置 -->
-            <el-tooltip
-              content="输入序号后按回车，题目移到该位置"
-              placement="top"
-            >
-              <el-input-number
-                :model-value="index + 1"
-                :min="1"
-                :max="questions.length"
-                size="small"
-                controls-position="right"
-                style="width: 80px"
-                @change="(val) => moveTo(index, val)"
-                @keyup.enter="$event.target.blur()"
-              />
-            </el-tooltip>
-            <el-button
-              size="small"
-              :disabled="index === 0"
-              @click="moveToTop(index)"
-              >置顶</el-button
-            >
-            <el-button-group>
+          <div class="section-item-range">{{ sectionRange(sec).text }}</div>
+        </div>
+        <div>
+          <el-button size="small" @click="openEditSection(sec)">编辑</el-button>
+          <el-button size="small" type="danger" text @click="deleteSection(sec)"
+            >删除</el-button
+          >
+        </div>
+      </div>
+    </div>
+
+    <div class="question-list">
+      <template v-for="(q, index) in questions" :key="q.id">
+        <div v-if="isSectionStart(index)" class="section-divider">
+          📌 {{ sectionTitle(q.section_id) }}
+        </div>
+        <el-card class="q-card">
+          <div class="q-row">
+            <div class="q-order">{{ q.order_num }}</div>
+            <div class="q-main">
+              <div class="q-content">{{ q.content }}</div>
+              <div class="q-tags">
+                <el-tag size="small" type="primary">{{
+                  typeLabel(q.question_type || "scale")
+                }}</el-tag>
+                <el-tag size="small" :type="roleTagType(q.role || 'student')">{{
+                  roleLabel(q.role || "student")
+                }}</el-tag>
+                <el-tag v-if="q.is_reverse_scored" size="small" type="warning"
+                  >反向计分</el-tag
+                >
+                <span v-if="q.question_type === 'scale'" class="q-range"
+                  >{{ q.min_score }}-{{ q.max_score }}分</span
+                >
+                <span v-if="formatOptions(q)" class="q-range">
+                  {{ formatOptions(q) }}
+                </span>
+              </div>
+            </div>
+            <div class="q-actions">
+              <!-- 直接输入序号调整位置 -->
+              <el-tooltip
+                content="输入序号后按回车，题目移到该位置"
+                placement="top"
+              >
+                <el-input-number
+                  :model-value="index + 1"
+                  :min="1"
+                  :max="questions.length"
+                  size="small"
+                  controls-position="right"
+                  style="width: 80px"
+                  @change="(val) => moveTo(index, val)"
+                  @keyup.enter="$event.target.blur()"
+                />
+              </el-tooltip>
               <el-button
                 size="small"
                 :disabled="index === 0"
-                @click="moveUp(index)"
-                >↑</el-button
+                @click="moveToTop(index)"
+                >置顶</el-button
               >
-              <el-button
-                size="small"
-                :disabled="index === questions.length - 1"
-                @click="moveDown(index)"
-                >↓</el-button
+              <el-button-group>
+                <el-button
+                  size="small"
+                  :disabled="index === 0"
+                  @click="moveUp(index)"
+                  >↑</el-button
+                >
+                <el-button
+                  size="small"
+                  :disabled="index === questions.length - 1"
+                  @click="moveDown(index)"
+                  >↓</el-button
+                >
+              </el-button-group>
+              <el-button size="small" @click="openEdit(q)">编辑</el-button>
+              <el-button size="small" type="danger" @click="deleteQuestion(q)"
+                >删除</el-button
               >
-            </el-button-group>
-            <el-button size="small" @click="openEdit(q)">编辑</el-button>
-            <el-button size="small" type="danger" @click="deleteQuestion(q)"
-              >删除</el-button
-            >
+            </div>
           </div>
-        </div>
-      </el-card>
+        </el-card>
+      </template>
     </div>
 
     <!-- 新增/编辑弹窗 -->
@@ -823,6 +959,22 @@ onMounted(() => {
           </el-form-item>
         </template>
 
+        <el-form-item v-if="sections.length > 0" label="所属板块">
+          <el-select
+            v-model="form.section_id"
+            clearable
+            placeholder="不属于任何板块"
+            style="width: 100%"
+          >
+            <el-option
+              v-for="sec in sections"
+              :key="sec.id"
+              :value="sec.id"
+              :label="sec.title"
+            />
+          </el-select>
+        </el-form-item>
+
         <el-form-item label="填写角色">
           <el-radio-group v-model="form.role">
             <el-radio
@@ -840,6 +992,56 @@ onMounted(() => {
         <el-button type="primary" @click="saveQuestion" :loading="saving"
           >保存</el-button
         >
+      </template>
+    </el-dialog>
+
+    <!-- 板块引导语弹窗 -->
+    <el-dialog
+      v-model="showSectionDialog"
+      :title="editingSectionId ? '编辑板块' : '添加板块引导语'"
+      width="520px"
+    >
+      <el-form :model="sectionForm" label-width="90px">
+        <el-form-item label="板块标题">
+          <el-input
+            v-model="sectionForm.title"
+            placeholder="例如：第一部分  情绪状态"
+          />
+        </el-form-item>
+        <el-form-item label="引导语">
+          <el-input
+            v-model="sectionForm.intro"
+            type="textarea"
+            :rows="4"
+            placeholder="例如：以下题目描述的是您最近一周的感受，请根据实际情况选择。"
+          />
+        </el-form-item>
+        <el-form-item label="包含题目">
+          <div style="display: flex; align-items: center; gap: 8px">
+            <span>第</span>
+            <el-input-number
+              v-model="sectionForm.from"
+              :min="1"
+              controls-position="right"
+              style="width: 100px"
+            />
+            <span>题 到 第</span>
+            <el-input-number
+              v-model="sectionForm.to"
+              :min="1"
+              controls-position="right"
+              style="width: 100px"
+            />
+            <span>题</span>
+          </div>
+          <div class="field-tip">
+            这些题目的上方都会显示板块标题和引导语。也可以在编辑单道题时选择「所属板块」。
+          </div>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showSectionDialog = false">取消</el-button>
+        <el-button type="primary" @click="saveSection">保存</el-button>
       </template>
     </el-dialog>
   </div>
@@ -924,6 +1126,51 @@ onMounted(() => {
   display: flex;
   gap: 8px;
   align-items: center;
+}
+.section-panel {
+  background: #fffdf5;
+  border: 1px solid #f3e6c4;
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+}
+.section-panel-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #8b6b2e;
+  margin-bottom: 8px;
+}
+.section-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 8px 0;
+  border-top: 1px dashed #f0dcae;
+}
+.section-item-main {
+  flex: 1;
+}
+.section-item-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #3d2b12;
+}
+.section-item-intro {
+  font-size: 12px;
+  color: #666;
+  margin: 2px 0;
+  white-space: pre-wrap;
+}
+.section-item-range {
+  font-size: 12px;
+  color: #999;
+}
+.section-divider {
+  font-size: 13px;
+  font-weight: 600;
+  color: #8b6b2e;
+  padding: 6px 4px 0;
 }
 .inherit-hint {
   font-size: 12px;
