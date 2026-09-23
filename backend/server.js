@@ -80,6 +80,61 @@ async function calcScore(questionnaireId, submissionId, connection) {
   return { ...result, questionMap };
 }
 
+// 某个维度理论上的最低分和最高分（画图表时作为刻度范围）
+function dimensionRange(dim, questionMap) {
+  const qs = (dim.question_ids || [])
+    .map((id) => questionMap[id])
+    .filter(Boolean);
+  if (qs.length === 0) return { min: 0, max: 0 };
+  const mins = qs.map((q) => Number(q.min_score));
+  const maxs = qs.map((q) => Number(q.max_score));
+  const sum = (arr) => arr.reduce((a, b) => a + b, 0);
+  if (dim.score_formula === "mean") {
+    return {
+      min: Math.round((sum(mins) / qs.length) * 100) / 100,
+      max: Math.round((sum(maxs) / qs.length) * 100) / 100,
+    };
+  }
+  return { min: sum(mins), max: sum(maxs) };
+}
+
+// 算出这份问卷所有已提交的人在每个维度上的平均分（和受测者自己的分数对比用）
+async function calcDimensionAverages(
+  connection,
+  questionnaireId,
+  questionMap,
+  dimensions,
+) {
+  const [allAnswers] = await connection.execute(
+    `SELECT a.* FROM answers a
+     INNER JOIN submissions s ON a.submission_id = s.id
+     WHERE s.questionnaire_id = ?`,
+    [questionnaireId],
+  );
+  // 按提交分组
+  const bySubmission = {};
+  allAnswers.forEach((ans) => {
+    if (!bySubmission[ans.submission_id]) bySubmission[ans.submission_id] = [];
+    bySubmission[ans.submission_id].push(ans);
+  });
+  // 每个维度收集所有人的得分
+  const scoreLists = dimensions.map(() => []);
+  let sampleSize = 0;
+  Object.values(bySubmission).forEach((answers) => {
+    const { dimensionScores } = computeScores(answers, questionMap, dimensions);
+    if (dimensionScores.some((d) => d.score !== null)) sampleSize++;
+    dimensionScores.forEach((d, i) => {
+      if (d.score !== null) scoreLists[i].push(d.score);
+    });
+  });
+  const averages = scoreLists.map((list) =>
+    list.length > 0
+      ? Math.round((list.reduce((a, b) => a + b, 0) / list.length) * 100) / 100
+      : null,
+  );
+  return { averages, sampleSize };
+}
+
 // 给总分和各维度匹配分数段：dimension_id 为空的规则按总分匹配，有值的按对应维度匹配
 function matchScoreRules(totalScore, dimensionScores, rules) {
   const inRange = (score, r) =>
@@ -194,11 +249,53 @@ app.get("/api/submissions/:id/report-public", async (req, res) => {
     }
     const questionnaireId = subRows[0].questionnaire_id;
 
-    const { totalScore, dimensionScores } = await calcScore(
+    const { totalScore, dimensionScores, questionMap } = await calcScore(
       questionnaireId,
       submissionId,
       connection,
     );
+
+    // 问卷开启了「答完显示结果图表」时，准备每个维度的：自己的分、平均分、分数范围
+    const [qRows] = await connection.execute(
+      "SELECT show_report_chart FROM questionnaires WHERE id = ?",
+      [questionnaireId],
+    );
+    let chart = null;
+    if (qRows[0]?.show_report_chart && dimensionScores.length > 0) {
+      const [dims] = await connection.execute(
+        "SELECT * FROM dimensions WHERE questionnaire_id = ? ORDER BY id ASC",
+        [questionnaireId],
+      );
+      for (const dim of dims) {
+        const [dqs] = await connection.execute(
+          "SELECT question_id FROM dimension_questions WHERE dimension_id = ?",
+          [dim.id],
+        );
+        dim.question_ids = dqs.map((d) => d.question_id);
+      }
+      const { averages, sampleSize } = await calcDimensionAverages(
+        connection,
+        questionnaireId,
+        questionMap,
+        dims,
+      );
+      chart = {
+        sample_size: sampleSize,
+        dimensions: dims.map((dim, i) => {
+          const mine = dimensionScores.find((d) => d.id === dim.id);
+          const range = dimensionRange(dim, questionMap);
+          return {
+            id: dim.id,
+            name: dim.name,
+            description: dim.description || "",
+            score: mine ? mine.score : null,
+            average: averages[i],
+            min: range.min,
+            max: range.max,
+          };
+        }),
+      };
+    }
 
     // 只取「对受测者可见」的分数段
     const [rules] = await connection.execute(
@@ -224,6 +321,7 @@ app.get("/api/submissions/:id/report-public", async (req, res) => {
           score: d.score,
           matched_rule: d.matched_rule,
         })),
+      chart, // 没开启图表时为 null
     });
   } catch (err) {
     console.error("获取公开报告失败:", err);
@@ -1065,6 +1163,7 @@ app.put("/api/questionnaires/:id", verifyAdminToken, async (req, res) => {
     max_responses,
     expires_at,
     is_active,
+    show_report_chart,
   } = req.body;
 
   if (!title) {
@@ -1096,7 +1195,7 @@ app.put("/api/questionnaires/:id", verifyAdminToken, async (req, res) => {
     }
 
     await connection.execute(
-      "UPDATE questionnaires SET title = ?, description = ?, consent_text = ?, track_timing = ?, max_responses = ?, expires_at = ?, is_active = ? WHERE id = ?",
+      "UPDATE questionnaires SET title = ?, description = ?, consent_text = ?, track_timing = ?, max_responses = ?, expires_at = ?, is_active = ?, show_report_chart = ? WHERE id = ?",
       [
         title,
         description || "",
@@ -1105,6 +1204,7 @@ app.put("/api/questionnaires/:id", verifyAdminToken, async (req, res) => {
         max_responses || null,
         expires_at || null,
         is_active !== false,
+        show_report_chart ? 1 : 0,
         questionnaireId,
       ],
     );

@@ -18,7 +18,21 @@ const trackingCode = ref("");
 const showTrackingInput = ref(false);
 const subjectReport = ref(null); // 提交后对受测者可见的报告
 const dimensionReports = ref([]); // 各维度对受测者可见的评价
-const infoFields = ref([]); // 需要收集的字段配置
+const reportChart = ref(null); // 结果图表数据（问卷开启图表时才有）
+
+// 条形长度：分数在这个维度「最低分~最高分」之间的位置（百分比）
+function barWidth(value, dim) {
+  if (value === null || value === undefined || dim.max === dim.min) return 0;
+  const pct = ((value - dim.min) / (dim.max - dim.min)) * 100;
+  return Math.max(2, Math.min(100, pct)); // 至少露出一点，看得出有条
+}
+
+// 某个维度匹配到的评价（没有就返回 null）
+function dimRule(name) {
+  const found = dimensionReports.value.find((d) => d.name === name);
+  return found ? found.matched_rule : null;
+}
+const infoFields = ref([]); // 需要收集的字段配置dimensionReports.value = reportData.dimension_reports || [];
 const infoAnswers = ref({}); // 受测者填写的基本信息
 const infoSubmitted = ref(false); // 基本信息是否已提交
 const submissionId = ref(null); // 提交后拿到的submission_id，用于关联基本信息
@@ -337,6 +351,7 @@ async function submitQuestionnaire() {
       if (reportData.success) {
         subjectReport.value = reportData.matched_rule; // 总分评价（可能为空）
         dimensionReports.value = reportData.dimension_reports || [];
+        reportChart.value = reportData.chart || null;
       }
     } catch (e) {}
   }
@@ -771,7 +786,7 @@ async function submitQuestionnaire() {
         <p class="result-sub">您的回答已安全提交，所有信息将匿名保存。</p>
         <!-- 对受测者可见的评价结果 -->
         <div
-          v-if="subjectReport || dimensionReports.length > 0"
+          v-if="subjectReport || (!reportChart && dimensionReports.length > 0)"
           class="subject-report"
         >
           <div class="report-divider"></div>
@@ -793,8 +808,12 @@ async function submitQuestionnaire() {
             </div>
           </template>
 
-          <!-- 各维度评价 -->
-          <div v-for="d in dimensionReports" :key="d.name" class="dim-report">
+          <!-- 各维度评价（有图表时显示在图表里，这里就不重复了） -->
+          <div
+            v-for="d in reportChart ? [] : dimensionReports"
+            :key="d.name"
+            class="dim-report"
+          >
             <div class="dim-report-head">
               <span class="dim-report-name">{{ d.name }}</span>
               <span
@@ -812,12 +831,162 @@ async function submitQuestionnaire() {
             </p>
           </div>
         </div>
+
+        <!-- 结果图表：每个维度一条，自己的分 vs 平均分 -->
+        <div v-if="reportChart" class="chart-block">
+          <div class="report-divider"></div>
+          <p class="report-title">各维度得分</p>
+          <div class="chart-legend">
+            <span><i class="legend-dot mine"></i>你的得分</span>
+            <span
+              ><i class="legend-dot avg"></i>平均分（{{
+                reportChart.sample_size
+              }}
+              人）</span
+            >
+          </div>
+
+          <div
+            v-for="dim in reportChart.dimensions"
+            :key="dim.id"
+            class="chart-dim"
+          >
+            <div class="chart-dim-head">
+              <span class="chart-dim-name">{{ dim.name }}</span>
+              <span
+                v-if="dimRule(dim.name)"
+                class="dim-report-badge"
+                :style="{
+                  background: (dimRule(dim.name).color || '#4CAF7D') + '22',
+                  color: dimRule(dim.name).color || '#4CAF7D',
+                  borderColor: (dimRule(dim.name).color || '#4CAF7D') + '88',
+                }"
+                >{{ dimRule(dim.name).label }}</span
+              >
+            </div>
+
+            <div class="bar-row">
+              <span class="bar-label">你的得分</span>
+              <div class="bar-track">
+                <div
+                  class="bar-fill mine"
+                  :style="{ width: barWidth(dim.score, dim) + '%' }"
+                ></div>
+              </div>
+              <span class="bar-value">{{ dim.score ?? "-" }}</span>
+            </div>
+            <div class="bar-row">
+              <span class="bar-label">平均分</span>
+              <div class="bar-track">
+                <div
+                  class="bar-fill avg"
+                  :style="{ width: barWidth(dim.average, dim) + '%' }"
+                ></div>
+              </div>
+              <span class="bar-value">{{ dim.average ?? "-" }}</span>
+            </div>
+            <div class="bar-scale">
+              <span>{{ dim.min }}</span
+              ><span>{{ dim.max }}</span>
+            </div>
+
+            <p v-if="dimRule(dim.name)?.description" class="dim-report-desc">
+              {{ dimRule(dim.name).description }}
+            </p>
+            <p v-else-if="dim.description" class="dim-report-desc">
+              {{ dim.description }}
+            </p>
+          </div>
+        </div>
       </div>
     </div>
   </div>
 </template>
 
 <style scoped>
+/* 结果图表 */
+.chart-dim {
+  text-align: left;
+}
+.chart-legend {
+  display: flex;
+  justify-content: center;
+  gap: 16px;
+  font-size: 12px;
+  color: #5a7a64;
+  margin-bottom: 8px;
+}
+.legend-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  margin-right: 4px;
+  vertical-align: -1px;
+}
+.legend-dot.mine,
+.bar-fill.mine {
+  background: #3f9e6e;
+}
+.legend-dot.avg,
+.bar-fill.avg {
+  background: #2a78d6;
+}
+.chart-dim {
+  background: #f9fcfa;
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-top: 10px;
+}
+.chart-dim-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.chart-dim-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #2e4a38;
+}
+.bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.bar-label {
+  width: 52px;
+  flex-shrink: 0;
+  font-size: 12px;
+  color: #5a7a64;
+}
+.bar-track {
+  flex: 1;
+  height: 10px;
+  background: #e8efea;
+  border-radius: 0 4px 4px 0;
+}
+.bar-fill {
+  height: 100%;
+  border-radius: 0 4px 4px 0; /* 条的末端圆角 */
+  transition: width 0.6s ease;
+}
+.bar-value {
+  width: 40px;
+  flex-shrink: 0;
+  text-align: right;
+  font-size: 13px;
+  font-weight: 600;
+  color: #2e4a38;
+}
+.bar-scale {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: #9ab0a2;
+  margin: 0 48px 0 60px; /* 和条形的起止位置对齐 */
+}
 /* 各维度评价 */
 .dim-report {
   text-align: left;

@@ -90,6 +90,7 @@ function openEditDialog() {
     is_active: questionnaire.value.is_active !== false,
     max_responses: questionnaire.value.max_responses || null,
     expires_at: questionnaire.value.expires_at || null,
+    show_report_chart: !!questionnaire.value.show_report_chart,
   };
   showEditDialog.value = true;
 }
@@ -549,6 +550,15 @@ onMounted(fetchDetail);
         </el-form-item>
         <el-form-item label="记录时长">
           <el-switch v-model="editForm.track_timing" />
+        </el-form-item>
+        <el-form-item label="结果图表">
+          <el-switch
+            v-model="editForm.show_report_chart"
+            active-text="答完后给受测者看维度得分图"
+          />
+          <div style="font-size: 12px; color: #999; line-height: 1.6">
+            显示每个维度的得分、所有人的平均分和对应说明（需要先配置维度）。
+          </div>
         </el-form-item>
         <el-divider>回收控制</el-divider>
         <el-form-item label="问卷状态">
