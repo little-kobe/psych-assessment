@@ -76,50 +76,90 @@ async function calcScore(questionnaireId, submissionId, connection) {
     [submissionId],
   );
 
-  // 第一步：处理反向计分，只处理量表题
+  const result = computeScores(answers, questionMap, dimensions);
+  return { ...result, questionMap };
+}
+
+// 统一计分函数（报告、回答记录列表、导出Excel 都用它，保证算法一致）
+// answers：某次提交的全部答案；questionMap：{题目id: 题目}；dimensions：维度配置（带 question_ids）
+function computeScores(answers, questionMap, dimensions) {
+  // 第一步：算出每道题的得分。只要答案里有数值（量表题、带分值的单选题）就参与计分
   const scoredAnswers = {};
   answers.forEach((ans) => {
     const q = questionMap[ans.question_id];
     if (!q) return;
-    // 非量表题不参与计分
-    if (q.question_type && q.question_type !== "scale") return;
-    if (ans.answer_value === null || ans.answer_value === undefined) return;
-    let score = Number(ans.answer_value);
+    let score = getAnswerScore(ans, q);
+    if (score === null || isNaN(score)) return;
     if (q.is_reverse_scored) {
+      // 反向计分：最高分 + 最低分 - 原始分
       score = Number(q.max_score) + Number(q.min_score) - score;
     }
     scoredAnswers[ans.question_id] = score;
   });
 
-  // 第二步：按维度汇总
+  // 第二步：按维度汇总（sum 求和，mean 取均值）
   let totalScore = 0;
   const dimensionScores = dimensions.map((dim) => {
-    const scores = dim.question_ids
+    const scores = (dim.question_ids || [])
       .map((qid) => scoredAnswers[qid])
-      .filter((s) => s !== undefined && !isNaN(s));
+      .filter((s) => s !== undefined);
 
-    let dimScore = 0;
+    let dimScore = null; // 这个维度一道题都没答时为 null
     if (scores.length > 0) {
-      if (dim.score_formula === "mean") {
-        dimScore =
-          Math.round(
-            (scores.reduce((a, b) => a + b, 0) / scores.length) * 100,
-          ) / 100;
-      } else {
-        dimScore = scores.reduce((a, b) => a + b, 0);
-      }
+      const sum = scores.reduce((a, b) => a + b, 0);
+      dimScore =
+        dim.score_formula === "mean"
+          ? Math.round((sum / scores.length) * 100) / 100
+          : sum;
+      totalScore += dimScore;
     }
-    totalScore += dimScore;
-    return { name: dim.name, score: dimScore, formula: dim.score_formula };
+    return {
+      id: dim.id,
+      name: dim.name,
+      score: dimScore,
+      formula: dim.score_formula,
+    };
   });
 
-  // 如果没有配置维度，直接把所有量表题分数加总
+  // 没有配置维度时，总分 = 所有计分题相加
   if (dimensions.length === 0) {
     totalScore = Object.values(scoredAnswers).reduce((a, b) => a + b, 0);
   }
 
   totalScore = Math.round(totalScore * 100) / 100;
-  return { totalScore, dimensionScores, questionMap, scoredAnswers };
+  return { totalScore, dimensionScores, scoredAnswers };
+}
+
+// 取一道题的原始分：优先用存下来的分数；
+// 老数据只存了选项文字的（比如后来才给选项配分值），按当前选项配置换算成分数
+function getAnswerScore(ans, q) {
+  if (ans.answer_value !== null && ans.answer_value !== undefined) {
+    return Number(ans.answer_value);
+  }
+  if (!q || !ans.answer_text) return null;
+  const opt = parseOptionList(q.options).find(
+    (o) => o.label === ans.answer_text && o.score !== null,
+  );
+  return opt ? Number(opt.score) : null;
+}
+
+// 把题目选项统一成 [{ label, score }] 格式（兼容旧数据：纯文字数组 ["偶尔","从不"]）
+function parseOptionList(raw) {
+  let arr = raw;
+  if (!arr) return [];
+  if (typeof arr === "string") {
+    try {
+      arr = JSON.parse(arr);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(arr)) return [];
+  return arr.map((o) =>
+    typeof o === "string"
+      ? { label: o, score: null }
+      : { label: o.label ?? "", score: o.score ?? null },
+  );
 }
 
 // 公开报告接口：只返回对受测者可见的分数段评价
@@ -721,6 +761,13 @@ app.get(
         "总用时(秒)",
       ];
 
+      // 某道题是否计分：量表题，或选项配了分值的单选题
+      const isScoredQuestion = (q) =>
+        !q.question_type ||
+        q.question_type === "scale" ||
+        (q.question_type === "single_choice" &&
+          parseOptionList(q.options).some((o) => o.score !== null));
+
       const questionScoreHeaders = questions.map((q) => {
         const typeMap = {
           scale: "得分",
@@ -729,7 +776,9 @@ app.get(
           yes_no: "是否",
           open_text: "回答",
         };
-        const typeSuffix = typeMap[q.question_type] || "得分";
+        const typeSuffix = isScoredQuestion(q)
+          ? "得分"
+          : typeMap[q.question_type] || "得分";
         // 题目内容超过12个字截断，避免列名过长
         const shortContent =
           q.content.length > 12 ? q.content.slice(0, 12) + "…" : q.content;
@@ -811,11 +860,13 @@ app.get(
           totalSeconds,
         ];
 
-        // 每题原始分
+        // 每题答案：有分数的显示分数（如「完全没有」显示 1），没有分数的显示文字
         const rawScores = questions.map((q) => {
           const ans = subAnswers[q.id];
           if (!ans) return "";
-          // 文字类答案（多选、是否、开放题、文字单选）优先显示answer_text
+          const score = getAnswerScore(ans, q);
+          if (score !== null) return score;
+          // 文字类答案（多选、是否、开放题、不计分的单选）显示 answer_text
           if (
             ans.answer_text !== null &&
             ans.answer_text !== undefined &&
@@ -848,42 +899,16 @@ app.get(
         let totalScore = "";
 
         if (dimensions.length > 0) {
-          // 先处理反向计分
-          const scoredAnswers = {};
-          Object.values(subAnswers).forEach((ans) => {
-            const q = questionMap[ans.question_id];
-            if (!q) return;
-            // 只有量表题才参与计分
-            if (q.question_type && q.question_type !== "scale") return;
-            if (ans.answer_value === null || ans.answer_value === undefined)
-              return;
-            let score = ans.answer_value;
-            if (q.is_reverse_scored) {
-              score = q.max_score + q.min_score - ans.answer_value;
-            }
-            scoredAnswers[ans.question_id] = score;
-          });
-
-          // 按维度汇总
-          let total = 0;
-          dimensionScoreCols = dimensions.map((dim) => {
-            const scores = dim.question_ids
-              .map((qid) => scoredAnswers[qid])
-              .filter((s) => s !== undefined);
-            if (scores.length === 0) return "";
-            let dimScore;
-            if (dim.score_formula === "mean") {
-              dimScore =
-                Math.round(
-                  (scores.reduce((a, b) => a + b, 0) / scores.length) * 100,
-                ) / 100;
-            } else {
-              dimScore = scores.reduce((a, b) => a + b, 0);
-            }
-            total += dimScore;
-            return dimScore;
-          });
-          totalScore = Math.round(total * 100) / 100;
+          // 用统一计分函数
+          const result = computeScores(
+            Object.values(subAnswers),
+            questionMap,
+            dimensions,
+          );
+          dimensionScoreCols = result.dimensionScores.map((d) =>
+            d.score === null ? "" : d.score,
+          );
+          totalScore = result.totalScore;
         }
 
         const row = [
@@ -918,6 +943,53 @@ app.get(
         else if (index < fixedColCount + questions.length * 2) col.width = 14;
         else col.width = 16;
       });
+
+      // 第二个工作表：题目与选项对照（说明每个分数对应哪个选项文字）
+      const codeSheet = workbook.addWorksheet("题目与选项对照");
+      codeSheet.addRow([
+        "题号",
+        "题目",
+        "题型",
+        "选项与分值",
+        "反向计分",
+        "所属维度",
+      ]);
+      codeSheet.getRow(1).font = { bold: true };
+      const typeNames = {
+        scale: "量表",
+        single_choice: "单选",
+        multiple_choice: "多选",
+        yes_no: "是否",
+        open_text: "开放题",
+      };
+      questions.forEach((q) => {
+        const opts = parseOptionList(q.options);
+        let optionText = "";
+        if (opts.some((o) => o.score !== null)) {
+          optionText = opts
+            .map((o) => `${o.label}=${o.score ?? "不计分"}`)
+            .join("；");
+        } else if (opts.length > 0) {
+          optionText = opts.map((o) => o.label).join("；");
+        } else if (!q.question_type || q.question_type === "scale") {
+          optionText = `${q.min_score}-${q.max_score}分`;
+        }
+        const dimNames = dimensions
+          .filter((d) => d.question_ids.includes(q.id))
+          .map((d) => d.name)
+          .join("、");
+        codeSheet.addRow([
+          `Q${q.order_num}`,
+          q.content,
+          typeNames[q.question_type] || "量表",
+          optionText,
+          q.is_reverse_scored ? "是" : "",
+          dimNames,
+        ]);
+      });
+      codeSheet.getColumn(2).width = 40;
+      codeSheet.getColumn(4).width = 50;
+      codeSheet.getColumn(6).width = 16;
 
       const filename = encodeURIComponent(
         `${questionnaire.title}_作答数据.xlsx`,
@@ -1084,48 +1156,14 @@ app.get(
         answersBySubmission[ans.submission_id][ans.question_id] = ans;
       });
 
-      // 为每条提交记录计算维度得分
+      // 为每条提交记录计算维度得分（用统一计分函数）
       const submissionsWithScores = submissions.map((sub) => {
-        const answers = answersBySubmission[sub.id] || {};
-
-        // 处理反向计分
-        const scoredAnswers = {};
-        Object.values(answers).forEach((ans) => {
-          const q = questionMap[ans.question_id];
-          if (!q) return;
-          let score = ans.answer_value;
-          if (q.is_reverse_scored) {
-            score = q.max_score + q.min_score - ans.answer_value;
-          }
-          scoredAnswers[ans.question_id] = score;
-        });
-
-        // 按维度汇总
-        let totalScore = 0;
-        const dimensionScores = dimensions.map((dim) => {
-          const scores = dim.question_ids
-            .map((qid) => scoredAnswers[qid])
-            .filter((s) => s !== undefined);
-
-          let dimScore = 0;
-          if (scores.length > 0) {
-            if (dim.score_formula === "mean") {
-              dimScore =
-                Math.round(
-                  (scores.reduce((a, b) => a + b, 0) / scores.length) * 100,
-                ) / 100;
-            } else {
-              dimScore = scores.reduce((a, b) => a + b, 0);
-            }
-          }
-          totalScore += dimScore;
-
-          return {
-            name: dim.name,
-            score: dimScore,
-            formula: dim.score_formula,
-          };
-        });
+        const answers = Object.values(answersBySubmission[sub.id] || {});
+        const { totalScore, dimensionScores } = computeScores(
+          answers,
+          questionMap,
+          dimensions,
+        );
 
         return {
           ...sub,
@@ -1538,8 +1576,8 @@ app.post(
           content,
           question_type || "scale",
           options ? JSON.stringify(options) : null,
-          min_score || 1,
-          max_score || 5,
+          min_score ?? 1, // 用 ?? 而不是 ||，否则最低分设成 0 会被改成 1
+          max_score ?? 5,
           role || "student",
           finalOrderNum,
           is_reverse_scored ? 1 : 0,
@@ -1578,8 +1616,8 @@ app.put("/api/questions/:id", verifyAdminToken, async (req, res) => {
         content,
         question_type || "scale",
         options ? JSON.stringify(options) : null,
-        min_score || 1,
-        max_score || 5,
+        min_score ?? 1, // 用 ?? 而不是 ||，否则最低分设成 0 会被改成 1
+        max_score ?? 5,
         role || "student",
         is_reverse_scored ? 1 : 0,
         questionId,
@@ -1694,6 +1732,14 @@ app.get("/api/submissions/:id/answers", verifyAdminToken, async (req, res) => {
         }
       } else if (ans.answer_value !== null) {
         displayValue = String(ans.answer_value);
+      }
+      // 选项文字和分数都有时，一起显示，如「完全没有（1分）」
+      if (
+        ans.answer_value !== null &&
+        ans.answer_text !== null &&
+        ans.answer_text !== ""
+      ) {
+        displayValue = `${displayValue}（${ans.answer_value}分）`;
       }
 
       return {
@@ -1978,6 +2024,78 @@ app.get(
     }
   },
 );
+
+// ========== 选项模板（常用回答选项，如「完全没有=1 … 重度=5」） ==========
+
+// 获取所有选项模板（课题组共享，所有人都能用）
+app.get("/api/option-templates", verifyAdminToken, async (req, res) => {
+  try {
+    const connection = await mysql.createConnection(dbConfig);
+    const [rows] = await connection.execute(
+      `SELECT t.*, a.display_name AS creator_name FROM option_templates t
+       LEFT JOIN admins a ON t.created_by = a.id ORDER BY t.id ASC`,
+    );
+    await connection.end();
+    res.json({ success: true, templates: rows });
+  } catch (err) {
+    console.error("获取选项模板失败:", err);
+    res.status(500).json({ success: false, message: "服务器错误" });
+  }
+});
+
+// 保存一个新模板
+app.post("/api/option-templates", verifyAdminToken, async (req, res) => {
+  const { name, options } = req.body;
+  if (!name || !Array.isArray(options) || options.length === 0) {
+    return res
+      .status(400)
+      .json({ success: false, message: "模板名称和选项不能为空" });
+  }
+  try {
+    const connection = await mysql.createConnection(dbConfig);
+    const [result] = await connection.execute(
+      "INSERT INTO option_templates (name, options, created_by) VALUES (?, ?, ?)",
+      [name, JSON.stringify(options), req.admin.adminId],
+    );
+    await connection.end();
+    res.json({ success: true, message: "模板已保存", id: result.insertId });
+  } catch (err) {
+    console.error("保存选项模板失败:", err);
+    res.status(500).json({ success: false, message: "服务器错误" });
+  }
+});
+
+// 删除模板（只能删自己的，导师可以删所有）
+app.delete("/api/option-templates/:id", verifyAdminToken, async (req, res) => {
+  try {
+    const connection = await mysql.createConnection(dbConfig);
+    const [rows] = await connection.execute(
+      "SELECT * FROM option_templates WHERE id = ?",
+      [req.params.id],
+    );
+    if (rows.length === 0) {
+      await connection.end();
+      return res.status(404).json({ success: false, message: "模板不存在" });
+    }
+    if (
+      req.admin.role !== "supervisor" &&
+      rows[0].created_by !== req.admin.adminId
+    ) {
+      await connection.end();
+      return res
+        .status(403)
+        .json({ success: false, message: "只能删除自己创建的模板" });
+    }
+    await connection.execute("DELETE FROM option_templates WHERE id = ?", [
+      req.params.id,
+    ]);
+    await connection.end();
+    res.json({ success: true, message: "模板已删除" });
+  } catch (err) {
+    console.error("删除选项模板失败:", err);
+    res.status(500).json({ success: false, message: "服务器错误" });
+  }
+});
 
 // 获取本机局域网 IP（生成问卷二维码用：手机和电脑连同一个 Wi-Fi 时，手机通过这个 IP 访问）
 app.get("/api/server-info", verifyAdminToken, (req, res) => {

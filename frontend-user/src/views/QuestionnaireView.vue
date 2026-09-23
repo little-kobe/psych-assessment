@@ -71,13 +71,37 @@ const currentAnswer = computed(() =>
   currentQuestion.value ? answersMap.value[currentQuestion.value.id] : null,
 );
 
+// 把选项统一成 [{ label, score }] 格式（兼容旧数据：纯文字数组）
 function parseOptions(options) {
-  if (!options) return [];
-  try {
-    return typeof options === "string" ? JSON.parse(options) : options;
-  } catch {
-    return [];
+  let arr = options;
+  if (!arr) return [];
+  if (typeof arr === "string") {
+    try {
+      arr = JSON.parse(arr);
+    } catch {
+      return [];
+    }
   }
+  if (!Array.isArray(arr)) return [];
+  return arr.map((o) =>
+    typeof o === "string"
+      ? { label: o, score: null }
+      : { label: o.label ?? "", score: o.score ?? null },
+  );
+}
+
+// 量表题：每个分数都配了文字时，受测者只看到文字按钮
+function scaleTextOptions(q) {
+  const opts = parseOptions(q.options);
+  return opts.length > 0 && opts.every((o) => o.label) ? opts : [];
+}
+
+// 量表题两端的提示文字（没配文字时显示「较低 / 较高」）
+function scaleEndLabel(q, end) {
+  const opts = parseOptions(q.options);
+  const score = end === "min" ? q.min_score : q.max_score;
+  const found = opts.find((o) => o.score === score && o.label);
+  return found ? found.label : end === "min" ? "较低" : "较高";
 }
 
 onMounted(async () => {
@@ -239,25 +263,31 @@ async function submitQuestionnaire() {
   const answers = allQuestions.value.map((q) => {
     const ans = answersMap.value[q.id];
     const type = q.question_type || "scale";
+    const opts = parseOptions(q.options);
 
-    // 明确按题型决定存哪个字段
-    const isTextType = [
-      "open_text",
-      "single_choice",
-      "yes_no",
-      "multiple_choice",
-    ].includes(type);
+    let answerValue = null; // 分数（参与计分、导出显示）
+    let answerText = null; // 文字（选项文字、开放题内容）
+
+    if (type === "scale") {
+      // 量表题：存分数；配了文字的顺便存文字
+      answerValue = typeof ans === "number" ? ans : null;
+      const opt = opts.find((o) => o.score === answerValue && o.label);
+      answerText = opt ? opt.label : null;
+    } else if (type === "single_choice") {
+      // 单选题：存选项文字；选项配了分值的同时存分数
+      answerText = ans !== undefined && ans !== null ? String(ans) : null;
+      const opt = opts.find((o) => o.label === ans);
+      answerValue = opt && opt.score !== null ? Number(opt.score) : null;
+    } else if (Array.isArray(ans)) {
+      answerText = JSON.stringify(ans); // 多选题
+    } else if (ans !== undefined && ans !== null) {
+      answerText = String(ans); // 是否题、开放题
+    }
 
     return {
       question_id: q.id,
-      answer_value: isTextType ? null : typeof ans === "number" ? ans : null,
-      answer_text: isTextType
-        ? Array.isArray(ans)
-          ? JSON.stringify(ans)
-          : ans !== undefined && ans !== null
-            ? String(ans)
-            : null
-        : null,
+      answer_value: answerValue,
+      answer_text: answerText,
       duration_ms: questionDurations.value[q.id] || 0,
     };
   });
@@ -553,36 +583,50 @@ async function submitQuestionnaire() {
           <p class="question-text">{{ currentQuestion.content }}</p>
 
           <!-- 量表题 -->
-          <div
+          <template
             v-if="
               !currentQuestion.question_type ||
               currentQuestion.question_type === 'scale'
             "
-            class="options"
           >
-            <button
-              v-for="n in currentQuestion.max_score -
-              currentQuestion.min_score +
-              1"
-              :key="n"
-              class="option-btn"
-              :class="{
-                active: currentAnswer === currentQuestion.min_score + n - 1,
-              }"
-              @click="selectAnswer(currentQuestion.min_score + n - 1)"
+            <!-- 每个分数都配了文字：只显示文字，选中后记录对应分数 -->
+            <div
+              v-if="scaleTextOptions(currentQuestion).length > 0"
+              class="text-options"
             >
-              {{ currentQuestion.min_score + n - 1 }}
-            </button>
-          </div>
-          <div
-            v-if="
-              !currentQuestion.question_type ||
-              currentQuestion.question_type === 'scale'
-            "
-            class="option-labels"
-          >
-            <span>较低</span><span>较高</span>
-          </div>
+              <button
+                v-for="opt in scaleTextOptions(currentQuestion)"
+                :key="opt.score"
+                class="text-option-btn"
+                :class="{ active: currentAnswer === opt.score }"
+                @click="selectAnswer(opt.score)"
+              >
+                {{ opt.label }}
+              </button>
+            </div>
+            <!-- 没配文字：显示数字按钮 -->
+            <template v-else>
+              <div class="options">
+                <button
+                  v-for="n in currentQuestion.max_score -
+                  currentQuestion.min_score +
+                  1"
+                  :key="n"
+                  class="option-btn"
+                  :class="{
+                    active: currentAnswer === currentQuestion.min_score + n - 1,
+                  }"
+                  @click="selectAnswer(currentQuestion.min_score + n - 1)"
+                >
+                  {{ currentQuestion.min_score + n - 1 }}
+                </button>
+              </div>
+              <div class="option-labels">
+                <span>{{ scaleEndLabel(currentQuestion, "min") }}</span
+                ><span>{{ scaleEndLabel(currentQuestion, "max") }}</span>
+              </div>
+            </template>
+          </template>
 
           <!-- 单选题（文字选项） -->
           <div
@@ -591,12 +635,12 @@ async function submitQuestionnaire() {
           >
             <button
               v-for="opt in parseOptions(currentQuestion.options)"
-              :key="opt"
+              :key="opt.label"
               class="text-option-btn"
-              :class="{ active: currentAnswer === opt }"
-              @click="selectAnswer(opt)"
+              :class="{ active: currentAnswer === opt.label }"
+              @click="selectAnswer(opt.label)"
             >
-              {{ opt }}
+              {{ opt.label }}
             </button>
           </div>
 
@@ -608,12 +652,12 @@ async function submitQuestionnaire() {
             <p class="multi-hint">可多选</p>
             <button
               v-for="opt in parseOptions(currentQuestion.options)"
-              :key="opt"
+              :key="opt.label"
               class="text-option-btn"
-              :class="{ active: isMultiSelected(opt) }"
-              @click="toggleMultiAnswer(opt)"
+              :class="{ active: isMultiSelected(opt.label) }"
+              @click="toggleMultiAnswer(opt.label)"
             >
-              {{ opt }}
+              {{ opt.label }}
             </button>
           </div>
 

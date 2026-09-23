@@ -223,13 +223,31 @@ function roleTagType(role) {
   return role === "parent" ? "warning" : role === "both" ? "success" : "info";
 }
 
+// 把选项统一成 [{ label, score }] 格式（兼容旧数据：纯文字数组）
 function parseOptions(options) {
-  if (!options) return [];
-  try {
-    return typeof options === "string" ? JSON.parse(options) : options;
-  } catch {
-    return [];
+  let arr = options;
+  if (!arr) return [];
+  if (typeof arr === "string") {
+    try {
+      arr = JSON.parse(arr);
+    } catch {
+      return [];
+    }
   }
+  if (!Array.isArray(arr)) return [];
+  return arr.map((o) =>
+    typeof o === "string"
+      ? { label: o, score: null }
+      : { label: o.label ?? "", score: o.score ?? null },
+  );
+}
+
+// 显示成「完全没有=1 / 轻度=2」
+function formatOptions(options) {
+  return parseOptions(options)
+    .filter((o) => o.label)
+    .map((o) => (o.score !== null ? `${o.label}=${o.score}` : o.label))
+    .join(" / ");
 }
 
 function goImport() {
@@ -369,6 +387,12 @@ onMounted(fetchDetail);
                     style="margin-left: 4px"
                     >反向</el-tag
                   >
+                  <div
+                    v-if="formatOptions(scope.row.options)"
+                    style="font-size: 12px; color: #666"
+                  >
+                    {{ formatOptions(scope.row.options) }}
+                  </div>
                 </span>
                 <span
                   v-else-if="scope.row.question_type === 'yes_no'"
@@ -390,7 +414,7 @@ onMounted(fetchDetail);
                   "
                 >
                   <span style="font-size: 12px; color: #666">
-                    {{ parseOptions(scope.row.options).join(" / ") }}
+                    {{ formatOptions(scope.row.options) }}
                   </span>
                 </span>
                 <span v-else style="color: #ccc; font-size: 12px">—</span>
@@ -481,7 +505,7 @@ onMounted(fetchDetail);
                         type="info"
                         style="margin: 2px"
                       >
-                        {{ ds.name }}：{{ ds.score }}
+                        {{ ds.name }}：{{ ds.score ?? "-" }}
                       </el-tag>
                     </div>
                   </template>
