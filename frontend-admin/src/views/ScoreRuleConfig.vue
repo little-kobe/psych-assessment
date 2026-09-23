@@ -110,7 +110,10 @@ async function saveRules() {
   }
 }
 
-onMounted(fetchRules);
+onMounted(() => {
+  fetchRules();
+  fetchDimensions();
+});
 </script>
 
 <template>
@@ -134,10 +137,21 @@ onMounted(fetchRules);
       :closable="false"
       show-icon
       style="margin-bottom: 20px"
-      description="根据受测者的总得分匹配对应的评价描述。可设置是否对受测者可见——开启后受测者提交问卷时会看到对应的评价；关闭则只有管理员在回答记录里能看到。"
+      description="可以按总分设置分数段，也可以给每个维度单独设置（求和型维度按维度总和匹配，均值型维度按维度平均分匹配）。开启「对受测者可见」后，受测者提交问卷时会看到对应评价；关闭则只有管理员在回答记录里能看到。"
     />
 
-    <div v-if="rules.length === 0 && !loading">
+    <!-- 选择给谁配置分数段：总分 / 各个维度 -->
+    <el-radio-group v-model="activeTarget" class="target-tabs">
+      <el-radio-button :value="0">总分（{{ ruleCount(0) }}）</el-radio-button>
+      <el-radio-button v-for="d in dimensions" :key="d.id" :value="d.id">
+        {{ d.name }}（{{ ruleCount(d.id) }}）
+      </el-radio-button>
+    </el-radio-group>
+    <p v-if="dimensions.length === 0" class="target-tip">
+      这份问卷还没有配置维度，目前只能按总分设置。需要维度报告请先到「配置维度」页面添加维度。
+    </p>
+
+    <div v-if="visibleRules.length === 0 && !loading">
       <el-empty
         description="还没有分数段配置，点击右上角「添加分数段」开始配置"
       >
@@ -146,10 +160,14 @@ onMounted(fetchRules);
     </div>
 
     <div class="rules-list">
-      <el-card v-for="(rule, index) in rules" :key="index" class="rule-card">
+      <el-card
+        v-for="(rule, index) in visibleRules"
+        :key="rules.indexOf(rule)"
+        class="rule-card"
+      >
         <div class="rule-header">
           <span class="rule-index">分数段 {{ index + 1 }}</span>
-          <el-button type="danger" size="small" text @click="removeRule(index)"
+          <el-button type="danger" size="small" text @click="removeRule(rule)"
             >删除</el-button
           >
         </div>
@@ -249,6 +267,15 @@ onMounted(fetchRules);
 </template>
 
 <style scoped>
+.target-tabs {
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.target-tip {
+  font-size: 12px;
+  color: #999;
+  margin: -8px 0 16px;
+}
 .preset-row {
   display: flex;
   flex-wrap: wrap;

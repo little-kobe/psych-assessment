@@ -80,6 +80,22 @@ async function calcScore(questionnaireId, submissionId, connection) {
   return { ...result, questionMap };
 }
 
+// 给总分和各维度匹配分数段：dimension_id 为空的规则按总分匹配，有值的按对应维度匹配
+function matchScoreRules(totalScore, dimensionScores, rules) {
+  const inRange = (score, r) =>
+    score !== null &&
+    score >= Number(r.min_score) &&
+    score <= Number(r.max_score);
+  const totalRule =
+    rules.find((r) => !r.dimension_id && inRange(totalScore, r)) || null;
+  const dimensions = dimensionScores.map((d) => ({
+    ...d,
+    matched_rule:
+      rules.find((r) => r.dimension_id === d.id && inRange(d.score, r)) || null,
+  }));
+  return { totalRule, dimensions };
+}
+
 // 统一计分函数（报告、回答记录列表、导出Excel 都用它，保证算法一致）
 // answers：某次提交的全部答案；questionMap：{题目id: 题目}；dimensions：维度配置（带 question_ids）
 function computeScores(answers, questionMap, dimensions) {
@@ -178,28 +194,36 @@ app.get("/api/submissions/:id/report-public", async (req, res) => {
     }
     const questionnaireId = subRows[0].questionnaire_id;
 
-    const { totalScore } = await calcScore(
+    const { totalScore, dimensionScores } = await calcScore(
       questionnaireId,
       submissionId,
       connection,
     );
 
+    // 只取「对受测者可见」的分数段
     const [rules] = await connection.execute(
       "SELECT * FROM score_rules WHERE questionnaire_id = ? AND visible_to_subject = 1 ORDER BY min_score ASC",
       [questionnaireId],
     );
-    const matchedRule =
-      rules.find(
-        (r) =>
-          totalScore >= Number(r.min_score) &&
-          totalScore <= Number(r.max_score),
-      ) || null;
+    const { totalRule, dimensions } = matchScoreRules(
+      totalScore,
+      dimensionScores,
+      rules,
+    );
 
     await connection.end();
     res.json({
       success: true,
       total_score: totalScore,
-      matched_rule: matchedRule,
+      matched_rule: totalRule,
+      // 各维度的评价（只返回匹配到可见分数段的维度）
+      dimension_reports: dimensions
+        .filter((d) => d.matched_rule)
+        .map((d) => ({
+          name: d.name,
+          score: d.score,
+          matched_rule: d.matched_rule,
+        })), // 全量更新：先删除这份问卷所有旧维度配置，再重新插入
     });
   } catch (err) {
     console.error("获取公开报告失败:", err);
@@ -1269,34 +1293,57 @@ app.post(
           .json({ success: false, message: "没有权限修改此问卷" });
       }
 
-      // 全量更新：先删除这份问卷所有旧维度配置，再重新插入
+      // 保存时保留原有维度的 id（维度的分数段报告靠 id 关联，不能每次保存都换新 id）
       const [oldDims] = await connection.execute(
         "SELECT id FROM dimensions WHERE questionnaire_id = ?",
         [questionnaireId],
       );
-      for (const dim of oldDims) {
-        await connection.execute(
-          "DELETE FROM dimension_questions WHERE dimension_id = ?",
-          [dim.id],
-        );
-      }
-      await connection.execute(
-        "DELETE FROM dimensions WHERE questionnaire_id = ?",
-        [questionnaireId],
-      );
+      const oldIds = oldDims.map((d) => d.id);
+      const keepIds = dimensions.filter((d) => d.id).map((d) => Number(d.id));
 
-      // 插入新维度配置
+      // 第一步：删掉这次被移除的维度（它的分数段会被数据库自动一起删掉）
+      for (const oldId of oldIds) {
+        if (!keepIds.includes(oldId)) {
+          await connection.execute(
+            "DELETE FROM dimension_questions WHERE dimension_id = ?",
+            [oldId],
+          );
+          await connection.execute("DELETE FROM dimensions WHERE id = ?", [
+            oldId,
+          ]);
+        }
+      }
+
+      // 第二步：已有的维度更新，新加的维度插入
       for (const dim of dimensions) {
-        const [result] = await connection.execute(
-          "INSERT INTO dimensions (questionnaire_id, name, description, score_formula) VALUES (?, ?, ?, ?)",
-          [
-            questionnaireId,
-            dim.name,
-            dim.description || "",
-            dim.score_formula || "sum",
-          ],
-        );
-        const dimensionId = result.insertId;
+        let dimensionId = Number(dim.id);
+        if (dimensionId && oldIds.includes(dimensionId)) {
+          await connection.execute(
+            "UPDATE dimensions SET name = ?, description = ?, score_formula = ? WHERE id = ?",
+            [
+              dim.name,
+              dim.description || "",
+              dim.score_formula || "sum",
+              dimensionId,
+            ],
+          );
+          // 题目关联先清空，下面重新写入
+          await connection.execute(
+            "DELETE FROM dimension_questions WHERE dimension_id = ?",
+            [dimensionId],
+          );
+        } else {
+          const [result] = await connection.execute(
+            "INSERT INTO dimensions (questionnaire_id, name, description, score_formula) VALUES (?, ?, ?, ?)",
+            [
+              questionnaireId,
+              dim.name,
+              dim.description || "",
+              dim.score_formula || "sum",
+            ],
+          );
+          dimensionId = result.insertId;
+        }
         for (const qid of dim.question_ids || []) {
           await connection.execute(
             "INSERT INTO dimension_questions (dimension_id, question_id) VALUES (?, ?)",
@@ -1849,8 +1896,8 @@ app.post(
       for (const rule of rules) {
         await connection.execute(
           `INSERT INTO score_rules
-    (questionnaire_id, min_score, max_score, label, description, visible_to_subject, color)
-   VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    (questionnaire_id, min_score, max_score, label, description, visible_to_subject, color, dimension_id)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             questionnaireId,
             rule.min_score,
@@ -1859,6 +1906,7 @@ app.post(
             rule.description || "",
             rule.visible_to_subject ? 1 : 0,
             rule.color || "#4CAF7D",
+            rule.dimension_id || null, // 空 = 按总分；有值 = 按这个维度
           ],
         );
       }
@@ -1900,19 +1948,18 @@ app.get("/api/submissions/:id/report", verifyAdminToken, async (req, res) => {
       "SELECT * FROM score_rules WHERE questionnaire_id = ? ORDER BY min_score ASC",
       [questionnaireId],
     );
-    const matchedRule =
-      rules.find(
-        (r) =>
-          totalScore >= Number(r.min_score) &&
-          totalScore <= Number(r.max_score),
-      ) || null;
+    const { totalRule, dimensions } = matchScoreRules(
+      totalScore,
+      dimensionScores,
+      rules,
+    );
 
     await connection.end();
     res.json({
       success: true,
       total_score: totalScore,
-      dimension_scores: dimensionScores,
-      matched_rule: matchedRule,
+      dimension_scores: dimensions, // 每个维度带 matched_rule
+      matched_rule: totalRule,
     });
   } catch (err) {
     console.error("获取报告失败:", err);

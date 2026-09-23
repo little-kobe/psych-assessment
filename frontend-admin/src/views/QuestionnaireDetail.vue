@@ -666,6 +666,49 @@ onMounted(fetchDetail);
             总分 {{ reportDetail.total_score }} 分，未匹配到任何分数段配置
           </div>
 
+          <!-- 各维度得分和评价 -->
+          <div
+            v-if="reportDetail && reportDetail.dimension_scores?.length > 0"
+            class="dim-report-list"
+          >
+            <div
+              v-for="d in reportDetail.dimension_scores"
+              :key="d.name"
+              class="dim-report-item"
+            >
+              <div class="dim-report-head">
+                <span class="dim-report-name">{{ d.name }}</span>
+                <span class="dim-report-score">{{ d.score ?? "-" }} 分</span>
+                <template v-if="d.matched_rule">
+                  <span
+                    class="dim-report-badge"
+                    :style="{
+                      background: (d.matched_rule.color || '#4CAF7D') + '22',
+                      color: d.matched_rule.color || '#4CAF7D',
+                      borderColor: (d.matched_rule.color || '#4CAF7D') + '66',
+                    }"
+                    >{{ d.matched_rule.label }}</span
+                  >
+                  <el-tag
+                    size="small"
+                    :type="
+                      d.matched_rule.visible_to_subject ? 'success' : 'warning'
+                    "
+                    >{{
+                      d.matched_rule.visible_to_subject
+                        ? "受测者可见"
+                        : "仅管理员可见"
+                    }}</el-tag
+                  >
+                </template>
+                <span v-else class="dim-report-none">未匹配分数段</span>
+              </div>
+              <div v-if="d.matched_rule?.description" class="dim-report-desc">
+                {{ d.matched_rule.description }}
+              </div>
+            </div>
+          </div>
+
           <el-table
             :data="answerDetail.answers"
             size="small"
@@ -723,6 +766,48 @@ onMounted(fetchDetail);
 </template>
 
 <style scoped>
+.dim-report-list {
+  margin: 10px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dim-report-item {
+  background: #fafafa;
+  border-radius: 8px;
+  padding: 8px 12px;
+}
+.dim-report-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.dim-report-name {
+  font-weight: 600;
+  color: #3d2b12;
+}
+.dim-report-score {
+  font-size: 13px;
+  color: #666;
+}
+.dim-report-badge {
+  padding: 1px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid;
+}
+.dim-report-none {
+  font-size: 12px;
+  color: #bbb;
+}
+.dim-report-desc {
+  font-size: 12px;
+  color: #5a7a64;
+  line-height: 1.6;
+  margin-top: 4px;
+}
 .action-section .el-button {
   margin: 0;
 }

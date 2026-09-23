@@ -17,6 +17,7 @@ const overallStartTime = ref(null);
 const trackingCode = ref("");
 const showTrackingInput = ref(false);
 const subjectReport = ref(null); // 提交后对受测者可见的报告
+const dimensionReports = ref([]); // 各维度对受测者可见的评价
 const infoFields = ref([]); // 需要收集的字段配置
 const infoAnswers = ref({}); // 受测者填写的基本信息
 const infoSubmitted = ref(false); // 基本信息是否已提交
@@ -768,22 +769,46 @@ async function submitQuestionnaire() {
         <h2>感谢您完成本次测评</h2>
         <p class="result-sub">您的回答已安全提交，所有信息将匿名保存。</p>
         <!-- 对受测者可见的评价结果 -->
-        <div v-if="subjectReport" class="subject-report">
+        <div
+          v-if="subjectReport || dimensionReports.length > 0"
+          class="subject-report"
+        >
           <div class="report-divider"></div>
           <p class="report-title">测评结果</p>
-          <div
-            class="report-label-badge"
-            :style="{
-              background: (subjectReport.color || '#4CAF7D') + '22',
-              color: subjectReport.color || '#4CAF7D',
-              border:
-                '1.5px solid ' + (subjectReport.color || '#4CAF7D') + '88',
-            }"
-          >
-            {{ subjectReport.label }}
-          </div>
-          <div v-if="subjectReport.description" class="report-desc-box">
-            {{ subjectReport.description }}
+          <template v-if="subjectReport">
+            <div
+              class="report-label-badge"
+              :style="{
+                background: (subjectReport.color || '#4CAF7D') + '22',
+                color: subjectReport.color || '#4CAF7D',
+                border:
+                  '1.5px solid ' + (subjectReport.color || '#4CAF7D') + '88',
+              }"
+            >
+              {{ subjectReport.label }}
+            </div>
+            <div v-if="subjectReport.description" class="report-desc-box">
+              {{ subjectReport.description }}
+            </div>
+          </template>
+
+          <!-- 各维度评价 -->
+          <div v-for="d in dimensionReports" :key="d.name" class="dim-report">
+            <div class="dim-report-head">
+              <span class="dim-report-name">{{ d.name }}</span>
+              <span
+                class="dim-report-badge"
+                :style="{
+                  background: (d.matched_rule.color || '#4CAF7D') + '22',
+                  color: d.matched_rule.color || '#4CAF7D',
+                  borderColor: (d.matched_rule.color || '#4CAF7D') + '88',
+                }"
+                >{{ d.matched_rule.label }}</span
+              >
+            </div>
+            <p v-if="d.matched_rule.description" class="dim-report-desc">
+              {{ d.matched_rule.description }}
+            </p>
           </div>
         </div>
       </div>
@@ -792,6 +817,39 @@ async function submitQuestionnaire() {
 </template>
 
 <style scoped>
+/* 各维度评价 */
+.dim-report {
+  text-align: left;
+  background: #f9fcfa;
+  border-radius: 10px;
+  padding: 10px 14px;
+  margin-top: 10px;
+}
+.dim-report-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.dim-report-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #2e4a38;
+}
+.dim-report-badge {
+  padding: 2px 12px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid;
+}
+.dim-report-desc {
+  font-size: 13px;
+  color: #5a7a64;
+  line-height: 1.7;
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+}
 /* 板块引导语 */
 .section-box {
   background: #f4fbf6;
