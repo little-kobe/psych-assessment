@@ -185,6 +185,26 @@ async function moveDown(index) {
   await saveOrder(arr);
 }
 
+// 把第 index 个题目移动到第 targetPos 位（targetPos 从 1 开始）
+async function moveTo(index, targetPos) {
+  const total = questions.value.length;
+  let pos = Math.round(Number(targetPos));
+  if (!pos || pos < 1) pos = 1;
+  if (pos > total) pos = total;
+  if (pos - 1 === index) return; // 位置没变
+
+  const arr = [...questions.value];
+  const [moved] = arr.splice(index, 1); // 先取出
+  arr.splice(pos - 1, 0, moved); // 再插到目标位置
+  await saveOrder(arr);
+  ElMessage.success(`已移到第 ${pos} 位`);
+}
+
+// 一键置顶
+function moveToTop(index) {
+  moveTo(index, 1);
+}
+
 async function saveOrder(arr) {
   const token = localStorage.getItem("admin_token");
   const orders = arr.map((q, i) => ({ id: q.id, order_num: i + 1 }));
@@ -256,7 +276,7 @@ onMounted(fetchQuestions);
       :closable="false"
       show-icon
       style="margin-bottom: 16px"
-      description="可以在线添加、编辑、删除题目，也可以用上下箭头调整题目顺序。Excel批量导入功能仍然可用。"
+      description="可以在线添加、编辑、删除题目。调整顺序：在序号框输入目标位置后按回车，或点「置顶」，或用上下箭头微调。Excel批量导入功能仍然可用。"
     />
 
     <div v-if="questions.length === 0 && !loading">
@@ -300,6 +320,28 @@ onMounted(fetchQuestions);
             </div>
           </div>
           <div class="q-actions">
+            <!-- 直接输入序号调整位置 -->
+            <el-tooltip
+              content="输入序号后按回车，题目移到该位置"
+              placement="top"
+            >
+              <el-input-number
+                :model-value="index + 1"
+                :min="1"
+                :max="questions.length"
+                size="small"
+                controls-position="right"
+                style="width: 80px"
+                @change="(val) => moveTo(index, val)"
+                @keyup.enter="$event.target.blur()"
+              />
+            </el-tooltip>
+            <el-button
+              size="small"
+              :disabled="index === 0"
+              @click="moveToTop(index)"
+              >置顶</el-button
+            >
             <el-button-group>
               <el-button
                 size="small"
