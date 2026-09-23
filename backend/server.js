@@ -7,6 +7,7 @@ const XLSX = require("xlsx");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const ExcelJS = require("exceljs");
+const os = require("os");
 
 const app = express();
 app.use(cors());
@@ -1977,6 +1978,19 @@ app.get(
     }
   },
 );
+
+// 获取本机局域网 IP（生成问卷二维码用：手机和电脑连同一个 Wi-Fi 时，手机通过这个 IP 访问）
+app.get("/api/server-info", verifyAdminToken, (req, res) => {
+  const ips = [];
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const addr of list || []) {
+      if (addr.family === "IPv4" && !addr.internal) ips.push(addr.address);
+    }
+  }
+  // 家用/校园 Wi-Fi 常见的 192.168.x.x 排在最前面
+  ips.sort((a, b) => b.startsWith("192.168.") - a.startsWith("192.168."));
+  res.json({ success: true, lan_ips: ips });
+});
 
 app.listen(PORT, () => {
   console.log(`后端服务已启动，访问 http://localhost:${PORT}`);

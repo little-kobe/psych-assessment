@@ -1,6 +1,7 @@
 <script setup>
 import { ref, onMounted, computed } from "vue";
 import { useRoute } from "vue-router";
+import { API_BASE } from "../api.js";
 
 const route = useRoute();
 const questionnaireId = Number(route.params.id) || 1;
@@ -82,7 +83,7 @@ function parseOptions(options) {
 onMounted(async () => {
   try {
     const response = await fetch(
-      `http://localhost:3000/api/questionnaire/${questionnaireId}`,
+      `${API_BASE}/api/questionnaire/${questionnaireId}`,
     );
     const data = await response.json();
     if (data.success) {
@@ -91,7 +92,7 @@ onMounted(async () => {
       // 拉取基本信息字段配置
       try {
         const infoRes = await fetch(
-          `http://localhost:3000/api/questionnaires/${questionnaireId}/info-fields`,
+          `${API_BASE}/api/questionnaires/${questionnaireId}/info-fields`,
         );
         const infoData = await infoRes.json();
         if (infoData.success) {
@@ -215,7 +216,7 @@ async function submitSubjectInfo(subId) {
     value: infoAnswers.value[f.field_key] || "",
   }));
   try {
-    await fetch(`http://localhost:3000/api/submissions/${subId}/subject-info`, {
+    await fetch(`${API_BASE}/api/submissions/${subId}/subject-info`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ info }),
@@ -261,7 +262,7 @@ async function submitQuestionnaire() {
     };
   });
 
-  const response = await fetch("http://localhost:3000/api/submission", {
+  const response = await fetch(`${API_BASE}/api/submission`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -291,7 +292,7 @@ async function submitQuestionnaire() {
     // 拉取报告
     try {
       const reportRes = await fetch(
-        `http://localhost:3000/api/submissions/${data.submission_id}/report-public`,
+        `${API_BASE}/api/submissions/${data.submission_id}/report-public`,
       );
       const reportData = await reportRes.json();
       if (reportData.success && reportData.matched_rule) {
