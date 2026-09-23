@@ -43,6 +43,7 @@ async function fetchData() {
     const dData = await dRes.json();
     if (dData.success) {
       dimensions.value = dData.dimensions.map((d) => ({
+        id: d.id, // 保留 id，保存时后端据此更新而不是重建（分数段报告要用）
         name: d.name,
         description: d.description || "",
         score_formula: d.score_formula || "sum",

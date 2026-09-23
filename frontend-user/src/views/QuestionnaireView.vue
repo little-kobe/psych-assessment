@@ -334,8 +334,9 @@ async function submitQuestionnaire() {
         `${API_BASE}/api/submissions/${data.submission_id}/report-public`,
       );
       const reportData = await reportRes.json();
-      if (reportData.success && reportData.matched_rule) {
-        subjectReport.value = reportData.matched_rule;
+      if (reportData.success) {
+        subjectReport.value = reportData.matched_rule; // 总分评价（可能为空）
+        dimensionReports.value = reportData.dimension_reports || [];
       }
     } catch (e) {}
   }

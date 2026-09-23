@@ -223,7 +223,7 @@ app.get("/api/submissions/:id/report-public", async (req, res) => {
           name: d.name,
           score: d.score,
           matched_rule: d.matched_rule,
-        })), // 全量更新：先删除这份问卷所有旧维度配置，再重新插入
+        })),
     });
   } catch (err) {
     console.error("获取公开报告失败:", err);

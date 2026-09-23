@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from "vue";
+import { ref, computed, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 
@@ -10,6 +10,32 @@ const questionnaireId = route.params.id;
 const rules = ref([]);
 const loading = ref(true);
 const saving = ref(false);
+const dimensions = ref([]); // 这份问卷的维度
+const activeTarget = ref(0); // 当前在配置谁的分数段：0 = 总分，其他 = 维度 id
+
+// 当前标签页下的分数段
+const visibleRules = computed(() =>
+  rules.value.filter((r) => (r.dimension_id || 0) === activeTarget.value),
+);
+
+// 某个对象（总分/维度）已经配置了几个分数段
+function ruleCount(target) {
+  return rules.value.filter((r) => (r.dimension_id || 0) === target).length;
+}
+
+async function fetchDimensions() {
+  const token = localStorage.getItem("admin_token");
+  try {
+    const res = await fetch(
+      `http://localhost:3000/api/questionnaires/${questionnaireId}/dimensions`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+    const data = await res.json();
+    if (data.success) dimensions.value = data.dimensions;
+  } catch (err) {
+    console.error("加载维度失败:", err);
+  }
+}
 
 // 心理学常用分段预设（标签+颜色）
 const presets = [
@@ -46,6 +72,7 @@ async function fetchRules() {
         visible_to_subject:
           r.visible_to_subject === 1 || r.visible_to_subject === true,
         color: r.color || "#4CAF7D",
+        dimension_id: r.dimension_id || null,
       }));
   } catch (err) {
     ElMessage.error("加载失败");
@@ -62,11 +89,12 @@ function addRule() {
     description: "",
     visible_to_subject: false,
     color: "#4CAF7D",
+    dimension_id: activeTarget.value || null, // 加到当前标签页（总分或某个维度）
   });
 }
 
-function removeRule(index) {
-  rules.value.splice(index, 1);
+function removeRule(rule) {
+  rules.value.splice(rules.value.indexOf(rule), 1);
 }
 
 async function saveRules() {
