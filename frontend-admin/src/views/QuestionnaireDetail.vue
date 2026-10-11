@@ -327,6 +327,14 @@ onMounted(fetchDetail);
           </el-button>
           <el-button
             size="small"
+            type="primary"
+            plain
+            @click="router.push(`/questionnaire/${questionnaireId}/stats`)"
+          >
+            <span>统计分析</span>
+          </el-button>
+          <el-button
+            size="small"
             type="success"
             @click="exportData"
             :loading="exporting"

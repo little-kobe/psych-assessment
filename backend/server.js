@@ -481,13 +481,259 @@ app.post("/api/submission", async (req, res) => {
   }
 });
 
-// 批量导入题目接口
+// ========== Excel 批量导入题目 ==========
+
+// 表头：每一项可以用这些列名（兼容旧模板，也兼容导出 Excel 里的「题目与选项对照」表）
+const IMPORT_COLUMNS = {
+  order: ["题号"],
+  content: ["题目内容", "题目"],
+  type: ["题型"],
+  options: ["选项", "选项与分值"],
+  min: ["最低分"],
+  max: ["最高分"],
+  reverse: ["是否反向计分", "反向计分"],
+  role: ["填写角色", "角色"],
+  section: ["所属板块", "板块"],
+  sectionIntro: ["板块引导语"],
+};
+
+// 单元格里的写法 → 系统里的值
+const TYPE_ALIASES = {
+  scale: ["量表", "量表题", "scale"],
+  single_choice: ["单选", "单选题", "single_choice"],
+  multiple_choice: ["多选", "多选题", "multiple_choice"],
+  yes_no: ["是否", "是否题", "是非", "是非题", "判断", "判断题", "yes_no"],
+  open_text: ["开放", "开放题", "填空", "填空题", "问答", "open_text"],
+};
+const ROLE_ALIASES = {
+  student: ["学生", "学生填写", "student"],
+  parent: ["家长", "家长填写", "parent"],
+  both: ["通用", "均可", "都可以", "both"],
+};
+
+function findAlias(map, raw) {
+  const v = String(raw ?? "")
+    .trim()
+    .toLowerCase();
+  for (const [key, list] of Object.entries(map)) {
+    if (list.some((a) => a.toLowerCase() === v)) return key;
+  }
+  return null;
+}
+
+function isYes(raw) {
+  return ["是", "y", "yes", "1", "true", "√", "反向"].includes(
+    String(raw ?? "")
+      .trim()
+      .toLowerCase(),
+  );
+}
+
+// 解析「选项」单元格，支持：
+//   完全没有=1；轻度=2；重度=3   （文字=分值）
+//   1=完全没有；2=轻度           （分值=文字）
+//   偶尔；从不；每天             （只有文字，不计分）
+// 选项之间用分号（；或 ;）、竖线 | 或换行分隔
+function parseOptionCell(raw) {
+  const text = String(raw ?? "").trim();
+  if (!text) return [];
+  const isNum = (x) => x !== "" && !isNaN(Number(x));
+  return text
+    .split(/[；;|\n]/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((item) => {
+      const pos = item.search(/[=＝]/);
+      if (pos === -1) return { label: item, score: null };
+      const left = item.slice(0, pos).trim();
+      const right = item.slice(pos + 1).trim();
+      if (right === "不计分" || right === "")
+        return { label: left, score: null };
+      if (isNum(right)) return { label: left, score: Number(right) };
+      if (isNum(left)) return { label: right, score: Number(left) };
+      return { label: item, score: null };
+    });
+}
+
+// 下载导入模板（带示例和填写说明）
+app.get(
+  "/api/questions/import-template",
+  verifyAdminToken,
+  async (req, res) => {
+    try {
+      const workbook = new ExcelJS.Workbook();
+      const sheet = workbook.addWorksheet("题目");
+      sheet.columns = [
+        { header: "题号", width: 8 },
+        { header: "题目内容", width: 36 },
+        { header: "题型", width: 10 },
+        { header: "选项", width: 46 },
+        { header: "最低分", width: 9 },
+        { header: "最高分", width: 9 },
+        { header: "是否反向计分", width: 14 },
+        { header: "填写角色", width: 10 },
+        { header: "所属板块", width: 18 },
+        { header: "板块引导语", width: 36 },
+      ];
+      const five = "完全没有=1；轻度=2；中度=3；偏重=4；重度=5";
+      [
+        [
+          1,
+          "我感到心情低落",
+          "量表",
+          five,
+          "",
+          "",
+          "否",
+          "学生",
+          "第一部分 情绪",
+          "以下题目请根据你最近一周的真实感受作答。",
+        ],
+        [
+          2,
+          "我对什么事都提不起兴趣",
+          "量表",
+          five,
+          "",
+          "",
+          "否",
+          "学生",
+          "第一部分 情绪",
+          "",
+        ],
+        [
+          3,
+          "我能很快入睡",
+          "量表",
+          "",
+          1,
+          5,
+          "是",
+          "学生",
+          "第二部分 睡眠",
+          "以下题目关于你最近一个月的睡眠情况。",
+        ],
+        [
+          4,
+          "你平时最常做的运动是",
+          "单选",
+          "跑步；游泳；篮球；其他",
+          "",
+          "",
+          "",
+          "学生",
+          "",
+          "",
+        ],
+        [
+          5,
+          "你喜欢哪些课外活动（可多选）",
+          "多选",
+          "阅读；运动；音乐；游戏",
+          "",
+          "",
+          "",
+          "学生",
+          "",
+          "",
+        ],
+        [6, "过去一周你是否失眠过", "是否", "", "", "", "", "学生", "", ""],
+        [
+          7,
+          "孩子最近在家的情绪表现",
+          "单选",
+          "很好=3；一般=2；较差=1",
+          "",
+          "",
+          "",
+          "家长",
+          "",
+          "",
+        ],
+        [8, "你还有什么想说的", "开放题", "", "", "", "", "学生", "", ""],
+      ].forEach((r) => sheet.addRow(r));
+      sheet.getRow(1).font = { bold: true };
+      sheet.getRow(1).fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FFE8F5E9" },
+      };
+
+      const help = workbook.addWorksheet("填写说明");
+      help.columns = [
+        { header: "列名", width: 14 },
+        { header: "是否必填", width: 10 },
+        { header: "怎么填", width: 70 },
+      ];
+      [
+        [
+          "题号",
+          "必填",
+          "第几题，写数字。题号和已有题目相同时会覆盖更新那道题，不会重复添加。",
+        ],
+        ["题目内容", "必填", "题目文字。"],
+        ["题型", "选填", "量表、单选、多选、是否、开放题。不填默认是量表。"],
+        [
+          "选项",
+          "选填",
+          "选项之间用分号隔开。要计分就写成「文字=分值」，如：完全没有=1；轻度=2；重度=3。不计分只写文字，如：偶尔；从不；每天。量表题只写文字不写分值时，从「最低分」开始依次给 1、2、3…分。单选、多选题至少要 2 个选项。",
+        ],
+        [
+          "最低分 / 最高分",
+          "选填",
+          "量表题不写选项文字时用（受测者看到数字按钮），默认 1~5 分。写了带分值的选项时会自动按选项计算，这两列可以不填。",
+        ],
+        [
+          "是否反向计分",
+          "选填",
+          "填「是」表示反向计分，不填或填「否」表示正向。",
+        ],
+        ["填写角色", "选填", "学生、家长、通用。不填默认学生。"],
+        [
+          "所属板块",
+          "选填",
+          "板块标题。标题相同的题归到同一个板块；这份问卷里还没有这个板块时会自动新建。",
+        ],
+        ["板块引导语", "选填", "板块的说明文字，写在该板块任意一行即可。"],
+        ["", "", ""],
+        [
+          "小提示",
+          "",
+          "表里有某一列，就以表里的内容为准（空着就是不设置）；表里没有这一列，已有题目原来的设置保持不变。所以旧版只有「题号、题目内容、最低分、最高分、是否反向计分」的表格照样能用。",
+        ],
+        [
+          "小提示",
+          "",
+          "导出数据里的「题目与选项对照」工作表也可以直接导入，用来把一份问卷的题目复制到另一份问卷。",
+        ],
+      ].forEach((r) => help.addRow(r));
+      help.getRow(1).font = { bold: true };
+      help.getColumn(3).alignment = { wrapText: true, vertical: "top" };
+
+      res.setHeader(
+        "Content-Type",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      );
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename*=UTF-8''${encodeURIComponent("题目导入模板.xlsx")}`,
+      );
+      await workbook.xlsx.write(res);
+      res.end();
+    } catch (err) {
+      console.error("生成导入模板失败:", err);
+      res.status(500).json({ success: false, message: "服务器错误" });
+    }
+  },
+);
+
+// 批量导入题目
 app.post(
   "/api/questions/import",
   verifyAdminToken,
   upload.single("file"),
   async (req, res) => {
-    const questionnaireId = req.body.questionnaire_id;
+    const questionnaireId = Number(req.body.questionnaire_id);
 
     if (!req.file) {
       return res.status(400).json({ success: false, message: "未收到文件" });
@@ -495,115 +741,303 @@ app.post(
     if (!questionnaireId) {
       return res
         .status(400)
-        .json({ success: false, message: "缺少questionnaire_id参数" });
+        .json({ success: false, message: "请先选择要导入到哪份问卷" });
     }
 
+    // 读取工作表
+    let rows;
+    let headers;
     try {
       const workbook = XLSX.read(req.file.buffer, { type: "buffer" });
-      const sheetName = workbook.SheetNames[0];
+      // 优先读「题目」或「题目与选项对照」工作表（导出的 Excel 可以直接导入），没有就读第一个
+      const sheetName =
+        ["题目", "题目与选项对照"].find((n) =>
+          workbook.SheetNames.includes(n),
+        ) || workbook.SheetNames[0];
       const sheet = workbook.Sheets[sheetName];
-      const rows = XLSX.utils.sheet_to_json(sheet);
-
-      if (rows.length === 0) {
-        return res
-          .status(400)
-          .json({ success: false, message: "Excel文件为空" });
-      }
-      const requiredColumns = [
-        "题号",
-        "题目内容",
-        "最低分",
-        "最高分",
-        "是否反向计分",
-      ];
-      const firstRowKeys = Object.keys(rows[0]);
-      const missingColumns = requiredColumns.filter(
-        (col) => !firstRowKeys.includes(col),
+      rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+      headers = (XLSX.utils.sheet_to_json(sheet, { header: 1 })[0] || []).map(
+        (h) => String(h).trim(),
       );
-      if (missingColumns.length > 0) {
-        return res.status(400).json({
+    } catch (err) {
+      return res.status(400).json({
+        success: false,
+        message: "文件解析失败，请确认上传的是 Excel 文件（.xlsx）",
+      });
+    }
+
+    // 找出每一项在表里用的列名（没有这一列就是 null）
+    const col = {};
+    for (const [key, names] of Object.entries(IMPORT_COLUMNS)) {
+      col[key] = names.find((n) => headers.includes(n)) || null;
+    }
+    if (!col.order || !col.content) {
+      return res.status(400).json({
+        success: false,
+        message: "Excel 第一行必须有「题号」和「题目内容」两列",
+      });
+    }
+    if (rows.length === 0) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Excel 里没有题目" });
+    }
+
+    const connection = await mysql.createConnection(dbConfig);
+    try {
+      const access = await checkQuestionnaireAccess(
+        connection,
+        questionnaireId,
+        req.admin,
+      );
+      if (access !== "ok") {
+        await connection.end();
+        return res.status(access === "notfound" ? 404 : 403).json({
           success: false,
-          message: `Excel缺少必要列：${missingColumns.join("、")}`,
+          message:
+            access === "notfound" ? "问卷不存在" : "没有权限修改这份问卷",
         });
       }
 
-      const connection = await mysql.createConnection(dbConfig);
+      // 这份问卷已有的板块（按标题找）
+      const [sectionRows] = await connection.execute(
+        "SELECT id, title, intro FROM question_sections WHERE questionnaire_id = ?",
+        [questionnaireId],
+      );
+      const sectionByTitle = {};
+      sectionRows.forEach((s) => (sectionByTitle[s.title] = s));
 
       let insertCount = 0;
       let updateCount = 0;
+      let sectionCount = 0;
       const errors = [];
+      const hasCol = (key) => col[key] !== null;
+      const cell = (row, key) =>
+        hasCol(key) ? String(row[col[key]] ?? "").trim() : "";
 
-      for (const row of rows) {
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        const excelRow = i + 2; // 第 1 行是表头
+        const orderNum = parseInt(cell(row, "order").replace(/[^\d]/g, ""), 10);
+        const content = cell(row, "content");
+        if (!orderNum && !content) continue; // 整行空着，跳过
+        if (!orderNum || !content) {
+          errors.push(`第 ${excelRow} 行：题号或题目内容为空，已跳过`);
+          continue;
+        }
+        const where = `第 ${excelRow} 行（题号 ${orderNum}）`;
+
         try {
-          const orderNum = row["题号"];
-          const content = row["题目内容"];
-          const minScore = row["最低分"];
-          const maxScore = row["最高分"];
-          const isReverse = row["是否反向计分"] === "是" ? 1 : 0;
+          const [existingRows] = await connection.execute(
+            "SELECT * FROM questions WHERE questionnaire_id = ? AND order_num = ?",
+            [questionnaireId, orderNum],
+          );
+          const existing = existingRows[0] || null;
 
-          if (!content || orderNum === undefined) {
-            errors.push(
-              `第${orderNum || "未知"}题：题号或题目内容为空，已跳过`,
-            );
+          // 题型：表里有这一列就用表里的，没有就保留原来的（新题默认量表）
+          let type = existing ? existing.question_type || "scale" : "scale";
+          if (hasCol("type") && cell(row, "type") !== "") {
+            type = findAlias(TYPE_ALIASES, cell(row, "type"));
+            if (!type) {
+              errors.push(
+                `${where}：不认识的题型「${cell(row, "type")}」，已跳过（可以填：量表、单选、多选、是否、开放题）`,
+              );
+              continue;
+            }
+          }
+
+          // 分值范围
+          const toNum = (v) => (v === "" ? null : Number(v));
+          let minScore = hasCol("min")
+            ? toNum(cell(row, "min"))
+            : existing
+              ? Number(existing.min_score)
+              : null;
+          let maxScore = hasCol("max")
+            ? toNum(cell(row, "max"))
+            : existing
+              ? Number(existing.max_score)
+              : null;
+          if (minScore === null) minScore = 1;
+          if (maxScore === null) maxScore = 5;
+          if (isNaN(minScore) || isNaN(maxScore)) {
+            errors.push(`${where}：最低分或最高分不是数字，已跳过`);
             continue;
           }
 
-          // 检查这份问卷里这个题号是否已存在
-          const [existing] = await connection.execute(
-            "SELECT id FROM questions WHERE questionnaire_id = ? AND order_num = ?",
-            [questionnaireId, orderNum],
-          );
+          // 选项：表里有这一列就用表里的，没有就保留原来的
+          let options = hasCol("options")
+            ? parseOptionCell(row[col.options])
+            : existing
+              ? parseOptionList(existing.options)
+              : [];
 
-          if (existing.length > 0) {
-            // 题号已存在：覆盖更新
+          // 「1-5分」这种写法：导出的对照表里，没配文字的量表题就是这样写的
+          const rangeMatch = hasCol("options")
+            ? cell(row, "options").match(
+                /^(-?\d+)\s*[-~～—–至到]\s*(-?\d+)\s*分?$/,
+              )
+            : null;
+          if (rangeMatch) {
+            minScore = Number(rangeMatch[1]);
+            maxScore = Number(rangeMatch[2]);
+            options = [];
+          }
+
+          if (type === "scale") {
+            if (options.length > 0) {
+              const scored = options.filter((o) => o.score !== null);
+              if (scored.length === 0) {
+                // 只写了文字：从最低分开始依次给分
+                options = options.map((o, idx) => ({
+                  label: o.label,
+                  score: minScore + idx,
+                }));
+              } else if (scored.length < options.length) {
+                errors.push(
+                  `${where}：量表题的选项要么都写分值，要么都不写，已跳过`,
+                );
+                continue;
+              }
+              const scores = options.map((o) => o.score);
+              if (!hasCol("options") && existing) {
+                // 沿用原来的选项文字时，分值范围变了就清空文字（对不上了）
+                if (
+                  Math.min(...scores) !== minScore ||
+                  Math.max(...scores) !== maxScore
+                ) {
+                  options = [];
+                }
+              } else {
+                minScore = Math.min(...scores);
+                maxScore = Math.max(...scores);
+              }
+            }
+            if (minScore >= maxScore) {
+              errors.push(`${where}：最高分必须大于最低分，已跳过`);
+              continue;
+            }
+          } else if (type === "single_choice" || type === "multiple_choice") {
+            if (options.length < 2) {
+              errors.push(`${where}：单选/多选题至少要 2 个选项，已跳过`);
+              continue;
+            }
+            if (type === "multiple_choice") {
+              options = options.map((o) => ({ label: o.label, score: null }));
+            }
+            const scores = options
+              .map((o) => o.score)
+              .filter((s) => s !== null);
+            if (scores.length > 0) {
+              minScore = Math.min(...scores);
+              maxScore = Math.max(...scores);
+            }
+          } else {
+            options = []; // 是否题、开放题没有选项
+          }
+
+          // 反向计分：只有量表题和带分值的单选题才有意义
+          let reverse = hasCol("reverse")
+            ? isYes(cell(row, "reverse"))
+            : existing
+              ? !!existing.is_reverse_scored
+              : false;
+          const canReverse =
+            type === "scale" ||
+            (type === "single_choice" && options.some((o) => o.score !== null));
+          if (!canReverse) reverse = false;
+
+          // 填写角色
+          let role = existing ? existing.role || "student" : "student";
+          if (hasCol("role")) {
+            if (cell(row, "role") === "") {
+              role = "student";
+            } else {
+              role = findAlias(ROLE_ALIASES, cell(row, "role"));
+              if (!role) {
+                errors.push(
+                  `${where}：不认识的填写角色「${cell(row, "role")}」，已跳过（可以填：学生、家长、通用）`,
+                );
+                continue;
+              }
+            }
+          }
+
+          // 所属板块：按标题找，没有就新建
+          let sectionId = existing ? existing.section_id : null;
+          if (hasCol("section")) {
+            const title = cell(row, "section");
+            const intro = cell(row, "sectionIntro");
+            if (title === "") {
+              sectionId = null;
+            } else if (sectionByTitle[title]) {
+              sectionId = sectionByTitle[title].id;
+              if (intro && intro !== sectionByTitle[title].intro) {
+                await connection.execute(
+                  "UPDATE question_sections SET intro = ? WHERE id = ?",
+                  [intro, sectionId],
+                );
+                sectionByTitle[title].intro = intro;
+              }
+            } else {
+              const [result] = await connection.execute(
+                "INSERT INTO question_sections (questionnaire_id, title, intro) VALUES (?, ?, ?)",
+                [questionnaireId, title, intro],
+              );
+              sectionId = result.insertId;
+              sectionByTitle[title] = { id: sectionId, title, intro };
+              sectionCount++;
+            }
+          }
+
+          const values = [
+            content,
+            type,
+            options.length > 0 ? JSON.stringify(options) : null,
+            minScore,
+            maxScore,
+            reverse ? 1 : 0,
+            role,
+            sectionId,
+          ];
+          if (existing) {
             await connection.execute(
-              "UPDATE questions SET content = ?, min_score = ?, max_score = ?, is_reverse_scored = ? WHERE questionnaire_id = ? AND order_num = ?",
-              [
-                content,
-                minScore,
-                maxScore,
-                isReverse,
-                questionnaireId,
-                orderNum,
-              ],
+              `UPDATE questions SET content = ?, question_type = ?, options = ?, min_score = ?,
+               max_score = ?, is_reverse_scored = ?, role = ?, section_id = ? WHERE id = ?`,
+              [...values, existing.id],
             );
             updateCount++;
           } else {
-            // 题号不存在：新增插入
             await connection.execute(
-              "INSERT INTO questions (questionnaire_id, content, order_num, min_score, max_score, is_reverse_scored) VALUES (?, ?, ?, ?, ?, ?)",
-              [
-                questionnaireId,
-                content,
-                orderNum,
-                minScore,
-                maxScore,
-                isReverse,
-              ],
+              `INSERT INTO questions (content, question_type, options, min_score, max_score,
+               is_reverse_scored, role, section_id, questionnaire_id, order_num)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              [...values, questionnaireId, orderNum],
             );
             insertCount++;
           }
         } catch (rowErr) {
-          errors.push(
-            `第${row["题号"] || "未知"}题处理失败：${rowErr.message}`,
-          );
+          errors.push(`${where}：处理失败（${rowErr.message}）`);
         }
       }
 
       await connection.end();
-
+      let message = `导入完成：新增 ${insertCount} 道题，更新 ${updateCount} 道题`;
+      if (sectionCount > 0) message += `，新建 ${sectionCount} 个板块`;
+      if (errors.length > 0)
+        message += `；有 ${errors.length} 行没有导入，见下方`;
       res.json({
         success: true,
-        message: `导入完成：新增 ${insertCount} 道题，更新 ${updateCount} 道题`,
+        message,
         insertCount,
         updateCount,
+        sectionCount,
         errors,
       });
     } catch (err) {
+      await connection.end();
       console.error("导入题目失败:", err);
-      res
-        .status(500)
-        .json({ success: false, message: "文件解析失败，请检查Excel格式" });
+      res.status(500).json({ success: false, message: "服务器错误" });
     }
   },
 );
@@ -867,6 +1301,12 @@ app.get(
         [questionnaireId],
       );
 
+      // 获取板块（写进「题目与选项对照」表）
+      const [codeSections] = await connection.execute(
+        "SELECT id, title, intro FROM question_sections WHERE questionnaire_id = ?",
+        [questionnaireId],
+      );
+
       await connection.end();
 
       // 把基本信息按submission_id分组
@@ -1093,7 +1533,15 @@ app.get(
         "选项与分值",
         "反向计分",
         "所属维度",
+        "填写角色",
+        "所属板块",
+        "板块引导语",
       ]);
+      // 板块（这张表可以直接导入到别的问卷，所以把角色和板块也写上）
+      const sectionById = {};
+      codeSections.forEach((sec) => (sectionById[sec.id] = sec));
+      const introWritten = new Set();
+      const roleNames = { student: "学生", parent: "家长", both: "通用" };
       codeSheet.getRow(1).font = { bold: true };
       const typeNames = {
         scale: "量表",
@@ -1118,6 +1566,13 @@ app.get(
           .filter((d) => d.question_ids.includes(q.id))
           .map((d) => d.name)
           .join("、");
+        const sec = q.section_id ? sectionById[q.section_id] : null;
+        // 板块引导语只在这个板块的第一道题写一次
+        let intro = "";
+        if (sec && !introWritten.has(sec.id)) {
+          intro = sec.intro || "";
+          introWritten.add(sec.id);
+        }
         codeSheet.addRow([
           `Q${q.order_num}`,
           q.content,
@@ -1125,11 +1580,16 @@ app.get(
           optionText,
           q.is_reverse_scored ? "是" : "",
           dimNames,
+          roleNames[q.role] || "学生",
+          sec ? sec.title : "",
+          intro,
         ]);
       });
       codeSheet.getColumn(2).width = 40;
       codeSheet.getColumn(4).width = 50;
       codeSheet.getColumn(6).width = 16;
+      codeSheet.getColumn(8).width = 18;
+      codeSheet.getColumn(9).width = 30;
 
       const filename = encodeURIComponent(
         `${questionnaire.title}_作答数据.xlsx`,
@@ -2193,6 +2653,465 @@ app.get(
     }
   },
 );
+
+// ========== 统计分析 ==========
+
+// 描述统计：人数、平均数、标准差（样本标准差，除以 n-1）、中位数、最小值、最大值
+function describe(values) {
+  const n = values.length;
+  if (n === 0) {
+    return { n: 0, mean: null, sd: null, median: null, min: null, max: null };
+  }
+  const round2 = (x) => Math.round(x * 100) / 100;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mean = values.reduce((a, b) => a + b, 0) / n;
+  const sd =
+    n > 1
+      ? Math.sqrt(values.reduce((s, v) => s + (v - mean) ** 2, 0) / (n - 1))
+      : null;
+  const median =
+    n % 2 === 1 ? sorted[(n - 1) / 2] : (sorted[n / 2 - 1] + sorted[n / 2]) / 2;
+  return {
+    n,
+    mean: round2(mean),
+    sd: sd === null ? null : round2(sd),
+    median: round2(median),
+    min: round2(sorted[0]),
+    max: round2(sorted[n - 1]),
+  };
+}
+
+// 分数分布（直方图）：整数分且范围不大时每个分数一格，否则平均分成 10 格
+function histogram(values, lo, hi) {
+  if (values.length === 0) return [];
+  lo = Math.min(lo, ...values);
+  hi = Math.max(hi, ...values);
+  const allInt = values.every((v) => Number.isInteger(v));
+  if (allInt && Number.isInteger(lo) && Number.isInteger(hi) && hi - lo <= 30) {
+    const bins = [];
+    for (let s = lo; s <= hi; s++) {
+      bins.push({ label: String(s), from: s, to: s, count: 0 });
+    }
+    values.forEach((v) => bins[v - lo].count++);
+    return bins;
+  }
+  const count = 10;
+  const width = (hi - lo) / count || 1;
+  const fmt = (x) => String(Math.round(x * 100) / 100);
+  const bins = [];
+  for (let i = 0; i < count; i++) {
+    const from = lo + i * width;
+    const to = i === count - 1 ? hi : lo + (i + 1) * width;
+    bins.push({ label: `${fmt(from)}~${fmt(to)}`, from, to, count: 0 });
+  }
+  values.forEach((v) => {
+    let idx = Math.floor((v - lo) / width);
+    if (idx >= count) idx = count - 1;
+    if (idx < 0) idx = 0;
+    bins[idx].count++;
+  });
+  return bins;
+}
+
+// 某份问卷的统计分析
+// 参数：group（只看某个分组，"__none__" 表示未分组）、complete_only（只统计完整作答，默认是）、
+//       exclude_fast（排除作答过快：平均每题不到 2 秒，默认否）
+app.get("/api/questionnaires/:id/stats", verifyAdminToken, async (req, res) => {
+  const questionnaireId = Number(req.params.id);
+  const groupFilter = req.query.group || "";
+  const completeOnly = req.query.complete_only !== "0";
+  const excludeFast = req.query.exclude_fast === "1";
+  const FAST_MS = 2000;
+  const NO_GROUP = "__none__";
+
+  const connection = await mysql.createConnection(dbConfig);
+  try {
+    const [qRows] = await connection.execute(
+      "SELECT * FROM questionnaires WHERE id = ?",
+      [questionnaireId],
+    );
+    if (qRows.length === 0) {
+      await connection.end();
+      return res.status(404).json({ success: false, message: "问卷不存在" });
+    }
+    if (
+      req.admin.role !== "supervisor" &&
+      qRows[0].created_by !== req.admin.adminId
+    ) {
+      await connection.end();
+      return res
+        .status(403)
+        .json({ success: false, message: "没有权限查看这份问卷的数据" });
+    }
+
+    const [questions] = await connection.execute(
+      "SELECT * FROM questions WHERE questionnaire_id = ? ORDER BY order_num ASC",
+      [questionnaireId],
+    );
+    const questionMap = {};
+    questions.forEach((q) => (questionMap[q.id] = q));
+
+    const [dimensions] = await connection.execute(
+      "SELECT * FROM dimensions WHERE questionnaire_id = ? ORDER BY id ASC",
+      [questionnaireId],
+    );
+    for (const dim of dimensions) {
+      const [dqs] = await connection.execute(
+        "SELECT question_id FROM dimension_questions WHERE dimension_id = ?",
+        [dim.id],
+      );
+      dim.question_ids = dqs.map((d) => d.question_id);
+    }
+
+    const [rules] = await connection.execute(
+      "SELECT * FROM score_rules WHERE questionnaire_id = ? ORDER BY min_score ASC",
+      [questionnaireId],
+    );
+    const [submissions] = await connection.execute(
+      "SELECT * FROM submissions WHERE questionnaire_id = ? ORDER BY finished_at ASC",
+      [questionnaireId],
+    );
+    const [allAnswers] = await connection.execute(
+      `SELECT a.* FROM answers a
+         INNER JOIN submissions s ON a.submission_id = s.id
+         WHERE s.questionnaire_id = ?`,
+      [questionnaireId],
+    );
+    await connection.end();
+
+    const answersBySub = {};
+    allAnswers.forEach((a) => {
+      if (!answersBySub[a.submission_id]) answersBySub[a.submission_id] = [];
+      answersBySub[a.submission_id].push(a);
+    });
+
+    // ---- 第一步：按条件筛选提交 ----
+    const groupKey = (s) => s.group_label || NO_GROUP;
+    let emptyCount = 0;
+    let incompleteCount = 0;
+    let fastCount = 0;
+    const kept = []; // 通过「完整 / 过快」筛选的（分组对比用）
+    submissions.forEach((s) => {
+      const answers = answersBySub[s.id] || [];
+      if (answers.length === 0) {
+        emptyCount++; // 没有任何答案的提交，一律不统计
+        return;
+      }
+      if (completeOnly && answers.length < questions.length) {
+        incompleteCount++;
+        return;
+      }
+      const timed = answers.filter((a) => a.duration_ms > 0);
+      if (excludeFast && timed.length > 0) {
+        const avg = timed.reduce((t, a) => t + a.duration_ms, 0) / timed.length;
+        if (avg < FAST_MS) {
+          fastCount++;
+          return;
+        }
+      }
+      kept.push({
+        sub: s,
+        answers,
+        ...computeScores(answers, questionMap, dimensions),
+      });
+    });
+    const valid = groupFilter
+      ? kept.filter((k) => groupKey(k.sub) === groupFilter)
+      : kept;
+
+    // ---- 第二步：回收概况 ----
+    const seconds = valid
+      .filter((k) => k.sub.started_at && k.sub.finished_at)
+      .map(
+        (k) =>
+          (new Date(k.sub.finished_at) - new Date(k.sub.started_at)) / 1000,
+      );
+    const dayKey = (d) => {
+      const x = new Date(d);
+      const pad = (n) => String(n).padStart(2, "0");
+      return `${x.getFullYear()}-${pad(x.getMonth() + 1)}-${pad(x.getDate())}`;
+    };
+    const dayCounts = {};
+    valid.forEach((k) => {
+      if (!k.sub.finished_at) return;
+      const key = dayKey(k.sub.finished_at);
+      dayCounts[key] = (dayCounts[key] || 0) + 1;
+    });
+    let daily = Object.keys(dayCounts)
+      .sort()
+      .map((date) => ({ date, count: dayCounts[date] }));
+    // 首尾之间不超过 92 天时，把没有提交的日子补成 0，趋势图才连贯
+    if (daily.length > 1) {
+      const first = new Date(daily[0].date + "T00:00:00");
+      const last = new Date(daily[daily.length - 1].date + "T00:00:00");
+      const days = Math.round((last - first) / 86400000);
+      if (days <= 92) {
+        const filled = [];
+        for (let i = 0; i <= days; i++) {
+          const d = new Date(first.getTime() + i * 86400000);
+          const key = dayKey(d);
+          filled.push({ date: key, count: dayCounts[key] || 0 });
+        }
+        daily = filled;
+      }
+    }
+    const groups = [...new Set(submissions.map(groupKey))].map((g) => ({
+      value: g,
+      label: g === NO_GROUP ? "未分组" : g,
+    }));
+    const overview = {
+      total_with_answers: submissions.length - emptyCount,
+      valid: valid.length,
+      empty: emptyCount,
+      excluded_incomplete: incompleteCount,
+      excluded_fast: fastCount,
+      duration: describe(seconds),
+      first_at: valid.length ? valid[0].sub.finished_at : null,
+      last_at: valid.length ? valid[valid.length - 1].sub.finished_at : null,
+      daily,
+    };
+
+    // ---- 第三步：总分和各维度的得分统计 ----
+    const scoredQuestions = questions.filter(
+      (q) =>
+        !q.question_type ||
+        q.question_type === "scale" ||
+        (q.question_type === "single_choice" &&
+          parseOptionList(q.options).some((o) => o.score !== null)),
+    );
+    const measures = [];
+    const bandsOf = (values, dimensionId) => {
+      const list = rules.filter(
+        (r) => (r.dimension_id || null) === (dimensionId || null),
+      );
+      if (list.length === 0) return [];
+      const bands = list.map((r) => ({
+        label: r.label,
+        color: r.color || "#4CAF7D",
+        min: Number(r.min_score),
+        max: Number(r.max_score),
+        count: 0,
+      }));
+      let unmatched = 0;
+      values.forEach((v) => {
+        const idx = list.findIndex(
+          (r) => v >= Number(r.min_score) && v <= Number(r.max_score),
+        );
+        if (idx === -1) unmatched++;
+        else bands[idx].count++;
+      });
+      if (unmatched > 0) {
+        bands.push({
+          label: "未匹配分数段",
+          color: "#9E9E9E",
+          min: null,
+          max: null,
+          count: unmatched,
+        });
+      }
+      return bands;
+    };
+    if (scoredQuestions.length > 0) {
+      // 总分：有维度时 = 各维度分相加；没有维度时 = 所有计分题相加
+      let lo = 0;
+      let hi = 0;
+      if (dimensions.length > 0) {
+        dimensions.forEach((d) => {
+          const r = dimensionRange(d, questionMap);
+          lo += r.min;
+          hi += r.max;
+        });
+      } else {
+        scoredQuestions.forEach((q) => {
+          lo += Number(q.min_score);
+          hi += Number(q.max_score);
+        });
+      }
+      const values = valid
+        .filter((k) => Object.keys(k.scoredAnswers).length > 0)
+        .map((k) => k.totalScore);
+      measures.push({
+        key: "total",
+        name: "总分",
+        formula: dimensions.length > 0 ? "各维度相加" : "所有计分题相加",
+        range: { min: lo, max: hi },
+        ...describe(values),
+        histogram: histogram(values, lo, hi),
+        bands: bandsOf(values, null),
+      });
+    }
+    dimensions.forEach((dim, i) => {
+      const r = dimensionRange(dim, questionMap);
+      const values = valid
+        .map((k) => k.dimensionScores[i].score)
+        .filter((v) => v !== null);
+      measures.push({
+        key: `dim${dim.id}`,
+        name: dim.name,
+        formula: dim.score_formula === "mean" ? "均值" : "求和",
+        range: r,
+        ...describe(values),
+        histogram: histogram(values, r.min, r.max),
+        bands: bandsOf(values, dim.id),
+      });
+    });
+
+    // ---- 第四步：分组对比（不受分组筛选影响） ----
+    const groupCompare = groups.map((g) => {
+      const members = kept.filter((k) => groupKey(k.sub) === g.value);
+      const result = {
+        value: g.value,
+        label: g.label,
+        n: members.length,
+        measures: {},
+      };
+      measures.forEach((m) => {
+        let values;
+        if (m.key === "total") {
+          values = members
+            .filter((k) => Object.keys(k.scoredAnswers).length > 0)
+            .map((k) => k.totalScore);
+        } else {
+          const i = dimensions.findIndex((d) => `dim${d.id}` === m.key);
+          values = members
+            .map((k) => k.dimensionScores[i].score)
+            .filter((v) => v !== null);
+        }
+        const d = describe(values);
+        result.measures[m.key] = { n: d.n, mean: d.mean, sd: d.sd };
+      });
+      return result;
+    });
+
+    // ---- 第五步：逐题分析（原始作答，反向题没有反转） ----
+    const items = questions.map((q) => {
+      const type = q.question_type || "scale";
+      const opts = parseOptionList(q.options);
+      const answers = valid
+        .map((k) => k.answers.find((a) => a.question_id === q.id))
+        .filter(Boolean);
+      const answered = answers.filter(
+        (a) =>
+          (a.answer_value !== null && a.answer_value !== undefined) ||
+          (a.answer_text !== null && a.answer_text !== ""),
+      );
+      const timed = answered.filter((a) => a.duration_ms > 0);
+      const item = {
+        id: q.id,
+        order_num: q.order_num,
+        content: q.content,
+        type,
+        reverse: !!q.is_reverse_scored,
+        n: answered.length,
+        avg_seconds: timed.length
+          ? Math.round(
+              (timed.reduce((t, a) => t + a.duration_ms, 0) /
+                timed.length /
+                1000) *
+                10,
+            ) / 10
+          : null,
+        score: null,
+        distribution: [],
+        texts: [],
+      };
+      const pct = (c) =>
+        answered.length ? Math.round((c / answered.length) * 1000) / 10 : 0;
+
+      if (type === "scale") {
+        const scores = answered
+          .map((a) => getAnswerScore(a, q))
+          .filter((s) => s !== null);
+        item.score = describe(scores);
+        const labelOf = (s) => {
+          const o = opts.find((x) => x.score === s && x.label);
+          return o ? `${o.label}（${s}）` : `${s} 分`;
+        };
+        for (let s = Number(q.min_score); s <= Number(q.max_score); s++) {
+          const c = scores.filter((x) => x === s).length;
+          item.distribution.push({ label: labelOf(s), count: c, pct: pct(c) });
+        }
+      } else if (type === "single_choice" || type === "yes_no") {
+        const labels =
+          type === "yes_no" ? ["是", "否"] : opts.map((o) => o.label);
+        const counts = {};
+        let other = 0;
+        answered.forEach((a) => {
+          if (labels.includes(a.answer_text))
+            counts[a.answer_text] = (counts[a.answer_text] || 0) + 1;
+          else other++;
+        });
+        labels.forEach((l) => {
+          const o = opts.find((x) => x.label === l);
+          const label = o && o.score !== null ? `${l}（${o.score}）` : l;
+          item.distribution.push({
+            label,
+            count: counts[l] || 0,
+            pct: pct(counts[l] || 0),
+          });
+        });
+        if (other > 0)
+          item.distribution.push({
+            label: "其他（选项已修改）",
+            count: other,
+            pct: pct(other),
+          });
+        if (type === "single_choice" && opts.some((o) => o.score !== null)) {
+          item.score = describe(
+            answered.map((a) => getAnswerScore(a, q)).filter((s) => s !== null),
+          );
+        }
+      } else if (type === "multiple_choice") {
+        const counts = {};
+        answered.forEach((a) => {
+          let picked = [];
+          try {
+            picked = JSON.parse(a.answer_text);
+          } catch {
+            picked = [];
+          }
+          (Array.isArray(picked) ? picked : []).forEach(
+            (l) => (counts[l] = (counts[l] || 0) + 1),
+          );
+        });
+        opts.forEach((o) =>
+          item.distribution.push({
+            label: o.label,
+            count: counts[o.label] || 0,
+            pct: pct(counts[o.label] || 0),
+          }),
+        );
+      } else if (type === "open_text") {
+        item.texts = answered
+          .map((a) => a.answer_text)
+          .filter(Boolean)
+          .slice(-50)
+          .reverse(); // 最近的在前，最多 50 条
+      }
+      return item;
+    });
+
+    res.json({
+      success: true,
+      questionnaire: { id: qRows[0].id, title: qRows[0].title },
+      filter: {
+        group: groupFilter,
+        complete_only: completeOnly,
+        exclude_fast: excludeFast,
+      },
+      question_count: questions.length,
+      groups,
+      overview,
+      measures,
+      group_compare: groupCompare,
+      items,
+    });
+  } catch (err) {
+    await connection.end().catch(() => {});
+    console.error("统计分析失败:", err);
+    res.status(500).json({ success: false, message: "服务器错误" });
+  }
+});
 
 // ========== 板块引导语（一组题共用一个大标题和说明） ==========
 

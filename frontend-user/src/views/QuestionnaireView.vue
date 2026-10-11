@@ -4,7 +4,7 @@ import { useRoute } from "vue-router";
 import { API_BASE } from "../api.js";
 
 const route = useRoute();
-const questionnaireId = Number(route.params.id) || 1;
+const questionnaireId = Number(route.params.id); // 网址里的问卷编号，写错时是 NaN
 const groupLabel = route.query.group || null; // 从链接参数读取分组标记
 const questionnaire = ref(null);
 const allQuestions = ref([]);
@@ -13,6 +13,7 @@ const submitted = ref(false);
 const consented = ref(false);
 const loading = ref(true);
 const closedMessage = ref("");
+const loadError = ref(""); // 问卷不存在、链接有误、连不上服务器时的提示
 const overallStartTime = ref(null);
 const trackingCode = ref("");
 const showTrackingInput = ref(false);
@@ -32,7 +33,7 @@ function dimRule(name) {
   const found = dimensionReports.value.find((d) => d.name === name);
   return found ? found.matched_rule : null;
 }
-const infoFields = ref([]); // 需要收集的字段配置dimensionReports.value = reportData.dimension_reports || [];
+const infoFields = ref([]); // 需要收集的字段配置
 const infoAnswers = ref({}); // 受测者填写的基本信息
 const infoSubmitted = ref(false); // 基本信息是否已提交
 const submissionId = ref(null); // 提交后拿到的submission_id，用于关联基本信息
@@ -127,6 +128,12 @@ function scaleEndLabel(q, end) {
 }
 
 onMounted(async () => {
+  // 网址里的问卷编号不是正整数（比如 /q/abc），不用请求后端，直接提示链接有误
+  if (!Number.isInteger(questionnaireId) || questionnaireId <= 0) {
+    loadError.value = "问卷链接有误";
+    loading.value = false;
+    return;
+  }
   try {
     const response = await fetch(
       `${API_BASE}/api/questionnaire/${questionnaireId}`,
@@ -162,9 +169,12 @@ onMounted(async () => {
       }
     } else if (data.closed) {
       closedMessage.value = data.message;
+    } else {
+      loadError.value = data.message || "问卷不存在";
     }
   } catch (err) {
     console.error("获取问卷失败:", err);
+    loadError.value = "暂时连不上服务器";
   } finally {
     loading.value = false;
   }
@@ -408,6 +418,23 @@ async function submitQuestionnaire() {
         </svg>
         <h2>{{ closedMessage }}</h2>
         <p class="closed-sub">本次调研已结束，感谢您的关注。</p>
+      </div>
+
+      <!-- 问卷不存在 / 链接有误 / 连不上服务器 -->
+      <div v-else-if="loadError" class="closed-card">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none">
+          <circle cx="12" cy="12" r="10" stroke="#8AAA94" stroke-width="1.5" />
+          <path
+            d="M12 7.5v5.5M12 16.2v.3"
+            stroke="#8AAA94"
+            stroke-width="1.8"
+            stroke-linecap="round"
+          />
+        </svg>
+        <h2>{{ loadError }}</h2>
+        <p class="closed-sub">
+          请确认链接是否完整，或联系发放问卷的老师或研究者。
+        </p>
       </div>
 
       <div v-else-if="!consented" class="consent-card">

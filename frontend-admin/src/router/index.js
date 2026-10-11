@@ -8,9 +8,15 @@ import AdminManage from "../views/AdminManage.vue";
 import QuestionEditor from "../views/QuestionEditor.vue";
 import ScoreRuleConfig from "../views/ScoreRuleConfig.vue";
 import SubjectInfoConfig from "../views/SubjectInfoConfig.vue";
+import StatsView from "../views/StatsView.vue";
 
 const routes = [
   { path: "/login", name: "login", component: LoginView },
+  {
+    path: "/questionnaire/:id/stats",
+    name: "questionnaireStats",
+    component: StatsView,
+  },
   {
     path: "/questionnaire/:id/info-fields",
     name: "subjectInfoConfig",
