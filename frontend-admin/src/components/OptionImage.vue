@@ -1,9 +1,10 @@
 <script setup>
+import { API_BASE } from "../api.js";
 // 选项图片：每个选项可以配一张图（图形推理题、表情量表等），受测者看到图片选项
 import { ref } from "vue";
 import { ElMessage } from "element-plus";
 
-const SERVER = "http://localhost:3000";
+const SERVER = API_BASE;
 const model = defineModel({ type: String, default: null });
 const emit = defineEmits(["uploaded"]);
 const uploading = ref(false);

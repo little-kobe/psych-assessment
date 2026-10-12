@@ -2,13 +2,15 @@
 // 一次性脚本：创建一个导师账号（超级管理员）和一个研究者账号（普通权限），运行一次即可
 
 const mysql = require("mysql2/promise");
+const envFile = require("path").join(__dirname, ".env");
+if (require("fs").existsSync(envFile)) process.loadEnvFile(envFile); // 服务器上读 backend/.env 里的数据库配置
 const bcrypt = require("bcryptjs");
 
 const dbConfig = {
-  host: "localhost",
-  user: "root",
-  password: "xinli0824", // 改成你自己的
-  database: "psych_assessment",
+  host: process.env.DB_HOST || "localhost",
+  user: process.env.DB_USER || "root",
+  password: process.env.DB_PASSWORD || "xinli0824",
+  database: process.env.DB_NAME || "psych_assessment",
 };
 
 async function createAdmins() {
@@ -32,6 +34,7 @@ async function createAdmins() {
   console.log("两个账号创建成功：");
   console.log("导师账号 - 用户名: supervisor，密码: supervisor123456");
   console.log("研究者账号 - 用户名: researcher1，密码: researcher123456");
+  console.log("上线后请马上用 tools/set-password.js 把这两个默认密码改掉");
 }
 
 createAdmins().catch((err) => console.error("创建失败:", err));

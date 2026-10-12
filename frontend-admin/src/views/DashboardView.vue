@@ -3,6 +3,7 @@ import { ref, onMounted } from "vue";
 import { useRouter } from "vue-router";
 import ShareLinkDialog from "../components/ShareLinkDialog.vue";
 import BundleList from "./BundleList.vue";
+import { API_BASE } from "../api.js";
 
 const router = useRouter();
 
@@ -26,7 +27,7 @@ async function fetchQuestionnaires() {
   loading.value = true;
   const token = localStorage.getItem("admin_token");
   try {
-    const response = await fetch("http://localhost:3000/api/questionnaires", {
+    const response = await fetch(`${API_BASE}/api/questionnaires`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     const data = await response.json();
@@ -43,7 +44,7 @@ async function fetchQuestionnaires() {
 async function createQuestionnaire() {
   const token = localStorage.getItem("admin_token");
   try {
-    const response = await fetch("http://localhost:3000/api/questionnaires", {
+    const response = await fetch(`${API_BASE}/api/questionnaires`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

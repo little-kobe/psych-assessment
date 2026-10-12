@@ -1,6 +1,7 @@
 <script setup>
 import { ref } from "vue";
 import { useRouter } from "vue-router";
+import { API_BASE } from "../api.js";
 
 const router = useRouter();
 const username = ref("");
@@ -18,7 +19,7 @@ async function handleLogin() {
   errorMsg.value = "";
 
   try {
-    const response = await fetch("http://localhost:3000/api/admin/login", {
+    const response = await fetch(`${API_BASE}/api/admin/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({

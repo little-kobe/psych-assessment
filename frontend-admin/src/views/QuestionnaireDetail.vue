@@ -3,6 +3,7 @@ import { ref, onMounted } from "vue";
 import { ArrowLeft } from "@element-plus/icons-vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
+import { API_BASE } from "../api.js";
 
 const route = useRoute();
 const router = useRouter();
@@ -33,7 +34,7 @@ async function fetchDetail() {
   const token = localStorage.getItem("admin_token");
   try {
     const response = await fetch(
-      `http://localhost:3000/api/questionnaires/${questionnaireId}`,
+      `${API_BASE}/api/questionnaires/${questionnaireId}`,
       {
         headers: { Authorization: `Bearer ${token}` },
       },
@@ -60,7 +61,7 @@ async function fetchSubmissions() {
   const token = localStorage.getItem("admin_token");
   try {
     const response = await fetch(
-      `http://localhost:3000/api/questionnaires/${questionnaireId}/submissions`,
+      `${API_BASE}/api/questionnaires/${questionnaireId}/submissions`,
       { headers: { Authorization: `Bearer ${token}` } },
     );
     const data = await response.json();
@@ -104,19 +105,19 @@ async function viewAnswers(submissionId) {
   const token = localStorage.getItem("admin_token");
   try {
     const ansRes = await fetch(
-      `http://localhost:3000/api/submissions/${submissionId}/answers`,
+      `${API_BASE}/api/submissions/${submissionId}/answers`,
       { headers: { Authorization: `Bearer ${token}` } },
     );
     const ansData = await ansRes.json();
     if (ansData.success) answerDetail.value = ansData;
 
     const reportRes = await fetch(
-      `http://localhost:3000/api/submissions/${submissionId}/report`,
+      `${API_BASE}/api/submissions/${submissionId}/report`,
       { headers: { Authorization: `Bearer ${token}` } },
     );
     // 同时拉取基本信息
     const infoRes = await fetch(
-      `http://localhost:3000/api/submissions/${submissionId}/subject-info`,
+      `${API_BASE}/api/submissions/${submissionId}/subject-info`,
       { headers: { Authorization: `Bearer ${token}` } },
     );
     const infoData = await infoRes.json();
@@ -139,7 +140,7 @@ async function saveEdit() {
   const token = localStorage.getItem("admin_token");
   try {
     const response = await fetch(
-      `http://localhost:3000/api/questionnaires/${questionnaireId}`,
+      `${API_BASE}/api/questionnaires/${questionnaireId}`,
       {
         method: "PUT",
         headers: {
@@ -169,7 +170,7 @@ async function exportData() {
   const token = localStorage.getItem("admin_token");
   try {
     const response = await fetch(
-      `http://localhost:3000/api/questionnaires/${questionnaireId}/export`,
+      `${API_BASE}/api/questionnaires/${questionnaireId}/export`,
       { headers: { Authorization: `Bearer ${token}` } },
     );
     if (!response.ok) {

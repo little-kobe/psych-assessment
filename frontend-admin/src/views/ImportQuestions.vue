@@ -3,6 +3,7 @@ import { ref, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import CopyQuestionsDialog from "../components/CopyQuestionsDialog.vue";
+import { API_BASE } from "../api.js";
 
 const route = useRoute();
 const router = useRouter();
@@ -96,7 +97,7 @@ const columnHelp = [
 async function fetchQuestionnaires() {
   const token = localStorage.getItem("admin_token");
   try {
-    const res = await fetch("http://localhost:3000/api/questionnaires", {
+    const res = await fetch(`${API_BASE}/api/questionnaires`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     const data = await res.json();
@@ -111,10 +112,9 @@ async function downloadTemplate() {
   downloading.value = true;
   const token = localStorage.getItem("admin_token");
   try {
-    const res = await fetch(
-      "http://localhost:3000/api/questions/import-template",
-      { headers: { Authorization: `Bearer ${token}` } },
-    );
+    const res = await fetch(`${API_BASE}/api/questions/import-template`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
     if (!res.ok) throw new Error();
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
@@ -168,7 +168,7 @@ async function uploadFile() {
 
   try {
     const token = localStorage.getItem("admin_token");
-    const response = await fetch("http://localhost:3000/api/questions/import", {
+    const response = await fetch(`${API_BASE}/api/questions/import`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}` },
       body: formData,

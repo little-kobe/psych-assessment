@@ -12,10 +12,17 @@ const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
 const statsMath = require("./stats-math");
+const video = require("./video");
+
+// 配置：上线时写在 backend/.env 文件里（数据库密码、JWT 密钥等），本地没有这个文件就用下面的默认值
+const ENV_FILE = path.join(__dirname, ".env");
+if (fs.existsSync(ENV_FILE)) process.loadEnvFile(ENV_FILE);
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
 
 const app = express();
+app.set("trust proxy", "loopback"); // 上线后前面有 nginx，按 nginx 转来的真实 IP 记录
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "2mb" }));
 
 const upload = multer({ storage: multer.memoryStorage() });
 
@@ -23,7 +30,17 @@ const upload = multer({ storage: multer.memoryStorage() });
 // 上传的文件存在 backend/uploads 文件夹，通过 http://localhost:3000/uploads/文件名 访问
 const UPLOAD_DIR = path.join(__dirname, "uploads");
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-app.use("/uploads", express.static(UPLOAD_DIR, { maxAge: "7d" }));
+app.use(
+  "/uploads",
+  express.static(UPLOAD_DIR, {
+    maxAge: "7d",
+    // 转换过格式的 .mov / .m4v 实际是 mp4，按 mp4 返回浏览器才能播
+    setHeaders: (res, filePath) => {
+      if (/\.(mov|m4v)$/i.test(filePath))
+        res.setHeader("Content-Type", "video/mp4");
+    },
+  }),
+);
 
 const MEDIA_TYPES = {
   image: [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"],
@@ -50,7 +67,11 @@ const mediaUpload = multer({
   fileFilter: (req, file, cb) => cb(null, !!mediaTypeOf(file.originalname)),
 });
 
-const JWT_SECRET = "woshilanqiuzhishen"; //用于加密令牌
+const JWT_SECRET = process.env.JWT_SECRET || "woshilanqiuzhishen"; // 用于加密令牌，上线必须在 .env 里换掉
+if (IS_PRODUCTION && !process.env.JWT_SECRET) {
+  console.error("上线环境必须在 .env 里设置 JWT_SECRET");
+  process.exit(1);
+}
 // 验证管理员登录令牌的中间件，挂在需要登录才能访问的接口前面
 function verifyAdminToken(req, res, next) {
   const authHeader = req.headers.authorization; // 前端会把token放在请求头里传过来
@@ -72,11 +93,58 @@ function verifyAdminToken(req, res, next) {
       .json({ success: false, message: "登录已过期，请重新登录" });
   }
 }
+// 权限检查中间件：研究者只能操作自己创建的问卷（以及其中的题目、提交记录），导师不受限制
+// kind：questionnaire（地址里的 :id 是问卷）、question（:id 是题目）、submission（:id 是提交记录）
+function requireAccess(kind) {
+  return async (req, res, next) => {
+    let connection;
+    try {
+      connection = await mysql.createConnection(dbConfig);
+      let questionnaireId = null;
+      if (kind === "questionnaire") {
+        questionnaireId = req.params.id;
+      } else {
+        const table = kind === "question" ? "questions" : "submissions";
+        const [rows] = await connection.execute(
+          `SELECT questionnaire_id FROM ${table} WHERE id = ?`,
+          [req.params.id],
+        );
+        questionnaireId = rows.length ? rows[0].questionnaire_id : null;
+      }
+      const access =
+        questionnaireId === null
+          ? "notfound"
+          : await checkQuestionnaireAccess(
+              connection,
+              questionnaireId,
+              req.admin,
+            );
+      await connection.end();
+      if (access !== "ok") {
+        const what = {
+          questionnaire: "问卷",
+          question: "题目",
+          submission: "提交记录",
+        }[kind];
+        return res.status(access === "notfound" ? 404 : 403).json({
+          success: false,
+          message: access === "notfound" ? `${what}不存在` : "没有权限操作",
+        });
+      }
+      next();
+    } catch (err) {
+      if (connection) await connection.end().catch(() => {});
+      console.error("权限检查失败:", err);
+      res.status(500).json({ success: false, message: "服务器错误" });
+    }
+  };
+}
+
 const dbConfig = {
-  host: "localhost",
-  user: "root",
-  password: "xinli0824",
-  database: "psych_assessment",
+  host: process.env.DB_HOST || "localhost",
+  user: process.env.DB_USER || "root",
+  password: process.env.DB_PASSWORD || "xinli0824",
+  database: process.env.DB_NAME || "psych_assessment",
 };
 
 app.get("/", (req, res) => {
@@ -616,12 +684,23 @@ app.post("/api/submission", async (req, res) => {
       }
     }
 
+    // 提交时间用服务器时间（以前直接存手机发来的 UTC 时间，显示出来差 8 小时）；
+    // 开始时间 = 提交时间 − 作答时长（时长按手机发来的开始、结束时间算）
+    const toMs = (t) =>
+      typeof t === "string" ? Date.parse(t.replace(" ", "T") + "Z") : NaN;
+    let durationSec = Math.round((toMs(finished_at) - toMs(started_at)) / 1000);
+    if (
+      !Number.isFinite(durationSec) ||
+      durationSec < 0 ||
+      durationSec > 7 * 86400
+    )
+      durationSec = 0;
+
     const [submissionResult] = await connection.execute(
-      "INSERT INTO submissions (questionnaire_id, started_at, finished_at, tracking_code, group_label, bundle_id, bundle_token, bundle_position) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO submissions (questionnaire_id, started_at, finished_at, tracking_code, group_label, bundle_id, bundle_token, bundle_position) VALUES (?, DATE_SUB(NOW(), INTERVAL ? SECOND), NOW(), ?, ?, ?, ?, ?)",
       [
         questionnaire_id,
-        started_at,
-        finished_at,
+        durationSec,
         tracking_code || null,
         group_label || null,
         bundleId,
@@ -1257,8 +1336,36 @@ app.post(
 );
 
 // 管理员登录接口
+// 登录失败次数限制：同一个 IP 15 分钟内输错 10 次就暂时不让登录（防止被人反复猜密码）
+const loginFails = new Map(); // ip -> { count, first }
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_MAX_FAILS = 10;
+function loginBlocked(ip) {
+  const r = loginFails.get(ip);
+  if (!r) return false;
+  if (Date.now() - r.first > LOGIN_WINDOW_MS) {
+    loginFails.delete(ip);
+    return false;
+  }
+  return r.count >= LOGIN_MAX_FAILS;
+}
+function recordLoginFail(ip) {
+  const r = loginFails.get(ip);
+  if (!r || Date.now() - r.first > LOGIN_WINDOW_MS) {
+    loginFails.set(ip, { count: 1, first: Date.now() });
+  } else {
+    r.count++;
+  }
+}
+
 app.post("/api/admin/login", async (req, res) => {
   const { username, password } = req.body;
+  if (loginBlocked(req.ip)) {
+    return res.status(429).json({
+      success: false,
+      message: "密码输错次数太多，请 15 分钟后再试",
+    });
+  }
 
   if (!username || !password) {
     return res
@@ -1275,6 +1382,7 @@ app.post("/api/admin/login", async (req, res) => {
     await connection.end();
 
     if (rows.length === 0) {
+      recordLoginFail(req.ip);
       return res
         .status(401)
         .json({ success: false, message: "账号或密码错误" });
@@ -1284,10 +1392,12 @@ app.post("/api/admin/login", async (req, res) => {
     const isMatch = await bcrypt.compare(password, admin.password_hash);
 
     if (!isMatch) {
+      recordLoginFail(req.ip);
       return res
         .status(401)
         .json({ success: false, message: "账号或密码错误" });
     }
+    loginFails.delete(req.ip);
 
     const token = jwt.sign(
       { adminId: admin.id, username: admin.username, role: admin.role },
@@ -1309,7 +1419,7 @@ app.post("/api/admin/login", async (req, res) => {
   }
 });
 
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 // 获取问卷列表，按角色过滤：导师看全部，研究者只看自己创建的
 app.get("/api/questionnaires", verifyAdminToken, async (req, res) => {
   try {
@@ -2000,6 +2110,7 @@ app.get(
 app.get(
   "/api/questionnaires/:id/dimensions",
   verifyAdminToken,
+  requireAccess("questionnaire"),
   async (req, res) => {
     const questionnaireId = req.params.id;
     try {
@@ -2030,6 +2141,7 @@ app.get(
 app.post(
   "/api/questionnaires/:id/dimensions",
   verifyAdminToken,
+  requireAccess("questionnaire"),
   async (req, res) => {
     const questionnaireId = req.params.id;
     const { dimensions, total_formula } = req.body;
@@ -2139,102 +2251,107 @@ app.post(
 );
 
 // 计算某次提交的得分（按维度）
-app.get("/api/submissions/:id/score", verifyAdminToken, async (req, res) => {
-  const submissionId = req.params.id;
-  try {
-    const connection = await mysql.createConnection(dbConfig);
+app.get(
+  "/api/submissions/:id/score",
+  verifyAdminToken,
+  requireAccess("submission"),
+  async (req, res) => {
+    const submissionId = req.params.id;
+    try {
+      const connection = await mysql.createConnection(dbConfig);
 
-    // 获取这次提交对应的问卷id
-    const [subRows] = await connection.execute(
-      "SELECT * FROM submissions WHERE id = ?",
-      [submissionId],
-    );
-    if (subRows.length === 0) {
-      await connection.end();
-      return res
-        .status(404)
-        .json({ success: false, message: "提交记录不存在" });
-    }
-    const questionnaireId = subRows[0].questionnaire_id;
-
-    // 获取这次提交的所有作答
-    const [answers] = await connection.execute(
-      "SELECT * FROM answers WHERE submission_id = ?",
-      [submissionId],
-    );
-
-    // 获取所有题目信息（为了知道反向计分和分值范围）
-    const [questions] = await connection.execute(
-      "SELECT * FROM questions WHERE questionnaire_id = ?",
-      [questionnaireId],
-    );
-    const questionMap = {};
-    questions.forEach((q) => {
-      questionMap[q.id] = q;
-    });
-
-    // 第一步：处理反向计分，得到每道题的实际得分
-    const scoredAnswers = {};
-    answers.forEach((ans) => {
-      const q = questionMap[ans.question_id];
-      if (!q) return;
-      let score = ans.answer_value;
-      if (q.is_reverse_scored) {
-        // 反向计分公式：最高分 + 最低分 - 原始分
-        score = q.max_score + q.min_score - ans.answer_value;
-      }
-      scoredAnswers[ans.question_id] = score;
-    });
-
-    // 第二步：获取维度配置，按维度汇总得分
-    const [dimensions] = await connection.execute(
-      "SELECT * FROM dimensions WHERE questionnaire_id = ?",
-      [questionnaireId],
-    );
-
-    const dimensionScores = [];
-    let totalScore = 0;
-
-    for (const dim of dimensions) {
-      const [dimQuestions] = await connection.execute(
-        "SELECT question_id FROM dimension_questions WHERE dimension_id = ?",
-        [dim.id],
+      // 获取这次提交对应的问卷id
+      const [subRows] = await connection.execute(
+        "SELECT * FROM submissions WHERE id = ?",
+        [submissionId],
       );
-      const scores = dimQuestions
-        .map((dq) => scoredAnswers[dq.question_id])
-        .filter((s) => s !== undefined);
+      if (subRows.length === 0) {
+        await connection.end();
+        return res
+          .status(404)
+          .json({ success: false, message: "提交记录不存在" });
+      }
+      const questionnaireId = subRows[0].questionnaire_id;
 
-      let dimScore = 0;
-      if (scores.length > 0) {
-        if (dim.score_formula === "mean") {
-          dimScore = scores.reduce((a, b) => a + b, 0) / scores.length;
-          dimScore = Math.round(dimScore * 100) / 100; // 保留两位小数
-        } else {
-          dimScore = scores.reduce((a, b) => a + b, 0);
+      // 获取这次提交的所有作答
+      const [answers] = await connection.execute(
+        "SELECT * FROM answers WHERE submission_id = ?",
+        [submissionId],
+      );
+
+      // 获取所有题目信息（为了知道反向计分和分值范围）
+      const [questions] = await connection.execute(
+        "SELECT * FROM questions WHERE questionnaire_id = ?",
+        [questionnaireId],
+      );
+      const questionMap = {};
+      questions.forEach((q) => {
+        questionMap[q.id] = q;
+      });
+
+      // 第一步：处理反向计分，得到每道题的实际得分
+      const scoredAnswers = {};
+      answers.forEach((ans) => {
+        const q = questionMap[ans.question_id];
+        if (!q) return;
+        let score = ans.answer_value;
+        if (q.is_reverse_scored) {
+          // 反向计分公式：最高分 + 最低分 - 原始分
+          score = q.max_score + q.min_score - ans.answer_value;
         }
+        scoredAnswers[ans.question_id] = score;
+      });
+
+      // 第二步：获取维度配置，按维度汇总得分
+      const [dimensions] = await connection.execute(
+        "SELECT * FROM dimensions WHERE questionnaire_id = ?",
+        [questionnaireId],
+      );
+
+      const dimensionScores = [];
+      let totalScore = 0;
+
+      for (const dim of dimensions) {
+        const [dimQuestions] = await connection.execute(
+          "SELECT question_id FROM dimension_questions WHERE dimension_id = ?",
+          [dim.id],
+        );
+        const scores = dimQuestions
+          .map((dq) => scoredAnswers[dq.question_id])
+          .filter((s) => s !== undefined);
+
+        let dimScore = 0;
+        if (scores.length > 0) {
+          if (dim.score_formula === "mean") {
+            dimScore = scores.reduce((a, b) => a + b, 0) / scores.length;
+            dimScore = Math.round(dimScore * 100) / 100; // 保留两位小数
+          } else {
+            dimScore = scores.reduce((a, b) => a + b, 0);
+          }
+        }
+
+        totalScore += dim.score_formula === "mean" ? dimScore : dimScore;
+        dimensionScores.push({
+          dimension_name: dim.name,
+          score_formula: dim.score_formula,
+          question_count: scores.length,
+          score: dimScore,
+        });
       }
 
-      totalScore += dim.score_formula === "mean" ? dimScore : dimScore;
-      dimensionScores.push({
-        dimension_name: dim.name,
-        score_formula: dim.score_formula,
-        question_count: scores.length,
-        score: dimScore,
+      await connection.end();
+      res.json({
+        success: true,
+        submission_id: submissionId,
+        total_score: totalScore,
+        dimension_scores: dimensionScores,
       });
+    } catch (err) {
+      console.error("计算得分失败:", err);
+      res.status(500).json({ success: false, message: "服务器错误" });
     }
-
-    await connection.end();
-    res.json({
-      success: true,
-      submission_id: submissionId,
-      total_score: totalScore,
-      dimension_scores: dimensionScores,
-    });
-  } catch (err) {
-    console.error("计算得分失败:", err);
-    res.status(500).json({ success: false, message: "服务器错误" });
-  }
-});
+  },
+);
 
 // 获取所有研究者账号列表（仅导师可用）
 app.get("/api/admins", verifyAdminToken, async (req, res) => {
@@ -2439,78 +2556,89 @@ app.post(
 );
 
 // 编辑单道题目
-app.put("/api/questions/:id", verifyAdminToken, async (req, res) => {
-  const questionId = req.params.id;
-  const {
-    content,
-    question_type,
-    options,
-    min_score,
-    max_score,
-    role,
-    is_reverse_scored,
-    section_id,
-    media,
-  } = req.body;
+app.put(
+  "/api/questions/:id",
+  verifyAdminToken,
+  requireAccess("question"),
+  async (req, res) => {
+    const questionId = req.params.id;
+    const {
+      content,
+      question_type,
+      options,
+      min_score,
+      max_score,
+      role,
+      is_reverse_scored,
+      section_id,
+      media,
+    } = req.body;
 
-  try {
-    const connection = await mysql.createConnection(dbConfig);
-    const cleanedMedia = cleanMedia(media);
-    await connection.execute(
-      `UPDATE questions SET
+    try {
+      const connection = await mysql.createConnection(dbConfig);
+      const cleanedMedia = cleanMedia(media);
+      await connection.execute(
+        `UPDATE questions SET
         content = ?, question_type = ?, options = ?,
         min_score = ?, max_score = ?, role = ?, is_reverse_scored = ?, section_id = ?,
         media = ?
        WHERE id = ?`,
-      [
-        content,
-        question_type || "scale",
-        options ? JSON.stringify(options) : null,
-        min_score ?? 1, // 用 ?? 而不是 ||，否则最低分设成 0 会被改成 1
-        max_score ?? 5,
-        role || "student",
-        is_reverse_scored ? 1 : 0,
-        section_id || null,
-        cleanedMedia ? JSON.stringify(cleanedMedia) : null,
-        questionId,
-      ],
-    );
-    await connection.end();
-    res.json({ success: true, message: "题目更新成功" });
-  } catch (err) {
-    console.error("编辑题目失败:", err);
-    res.status(500).json({ success: false, message: "服务器错误" });
-  }
-});
+        [
+          content,
+          question_type || "scale",
+          options ? JSON.stringify(options) : null,
+          min_score ?? 1, // 用 ?? 而不是 ||，否则最低分设成 0 会被改成 1
+          max_score ?? 5,
+          role || "student",
+          is_reverse_scored ? 1 : 0,
+          section_id || null,
+          cleanedMedia ? JSON.stringify(cleanedMedia) : null,
+          questionId,
+        ],
+      );
+      await connection.end();
+      res.json({ success: true, message: "题目更新成功" });
+    } catch (err) {
+      console.error("编辑题目失败:", err);
+      res.status(500).json({ success: false, message: "服务器错误" });
+    }
+  },
+);
 
 // 删除单道题目
-app.delete("/api/questions/:id", verifyAdminToken, async (req, res) => {
-  const questionId = req.params.id;
-  try {
-    const connection = await mysql.createConnection(dbConfig);
-    // 先删关联答案，再删题目
-    await connection.execute("DELETE FROM answers WHERE question_id = ?", [
-      questionId,
-    ]);
-    await connection.execute(
-      "DELETE FROM dimension_questions WHERE question_id = ?",
-      [questionId],
-    );
-    await connection.execute("DELETE FROM questions WHERE id = ?", [
-      questionId,
-    ]);
-    await connection.end();
-    res.json({ success: true, message: "题目已删除" });
-  } catch (err) {
-    console.error("删除题目失败:", err);
-    res.status(500).json({ success: false, message: "服务器错误" });
-  }
-});
+app.delete(
+  "/api/questions/:id",
+  verifyAdminToken,
+  requireAccess("question"),
+  async (req, res) => {
+    const questionId = req.params.id;
+    try {
+      const connection = await mysql.createConnection(dbConfig);
+      // 先删关联答案，再删题目
+      await connection.execute("DELETE FROM answers WHERE question_id = ?", [
+        questionId,
+      ]);
+      await connection.execute(
+        "DELETE FROM dimension_questions WHERE question_id = ?",
+        [questionId],
+      );
+      await connection.execute("DELETE FROM questions WHERE id = ?", [
+        questionId,
+      ]);
+      await connection.end();
+      res.json({ success: true, message: "题目已删除" });
+    } catch (err) {
+      console.error("删除题目失败:", err);
+      res.status(500).json({ success: false, message: "服务器错误" });
+    }
+  },
+);
 
 // 批量更新题目顺序（拖拽排序用）
 app.put(
   "/api/questionnaires/:id/questions/reorder",
   verifyAdminToken,
+  requireAccess("questionnaire"),
   async (req, res) => {
     const { orders } = req.body; // [{ id: 1, order_num: 1 }, { id: 3, order_num: 2 }, ...]
 
@@ -2522,8 +2650,8 @@ app.put(
       const connection = await mysql.createConnection(dbConfig);
       for (const item of orders) {
         await connection.execute(
-          "UPDATE questions SET order_num = ? WHERE id = ?",
-          [item.order_num, item.id],
+          "UPDATE questions SET order_num = ? WHERE id = ? AND questionnaire_id = ?",
+          [item.order_num, item.id, req.params.id],
         );
       }
       await connection.end();
@@ -2536,91 +2664,97 @@ app.put(
 );
 
 // 获取某条提交记录的逐题答案详情
-app.get("/api/submissions/:id/answers", verifyAdminToken, async (req, res) => {
-  const submissionId = req.params.id;
-  try {
-    const connection = await mysql.createConnection(dbConfig);
+app.get(
+  "/api/submissions/:id/answers",
+  verifyAdminToken,
+  requireAccess("submission"),
+  async (req, res) => {
+    const submissionId = req.params.id;
+    try {
+      const connection = await mysql.createConnection(dbConfig);
 
-    // 获取提交记录和问卷信息
-    const [subRows] = await connection.execute(
-      "SELECT s.*, q.title AS questionnaire_title FROM submissions s JOIN questionnaires q ON s.questionnaire_id = q.id WHERE s.id = ?",
-      [submissionId],
-    );
-    if (subRows.length === 0) {
-      await connection.end();
-      return res
-        .status(404)
-        .json({ success: false, message: "提交记录不存在" });
-    }
+      // 获取提交记录和问卷信息
+      const [subRows] = await connection.execute(
+        "SELECT s.*, q.title AS questionnaire_title FROM submissions s JOIN questionnaires q ON s.questionnaire_id = q.id WHERE s.id = ?",
+        [submissionId],
+      );
+      if (subRows.length === 0) {
+        await connection.end();
+        return res
+          .status(404)
+          .json({ success: false, message: "提交记录不存在" });
+      }
 
-    // 获取逐题答案，连接题目信息
-    const [answers] = await connection.execute(
-      `SELECT a.*, q.content, q.question_type, q.order_num, q.min_score, q.max_score,
+      // 获取逐题答案，连接题目信息
+      const [answers] = await connection.execute(
+        `SELECT a.*, q.content, q.question_type, q.order_num, q.min_score, q.max_score,
               q.is_reverse_scored, q.options, q.role
        FROM answers a
        JOIN questions q ON a.question_id = q.id
        WHERE a.submission_id = ?
        ORDER BY q.order_num ASC`,
-      [submissionId],
-    );
+        [submissionId],
+      );
 
-    await connection.end();
+      await connection.end();
 
-    // 格式化答案显示
-    const formattedAnswers = answers.map((ans) => {
-      let displayValue = "";
-      if (
-        ans.answer_text !== null &&
-        ans.answer_text !== undefined &&
-        ans.answer_text !== ""
-      ) {
-        try {
-          const parsed = JSON.parse(ans.answer_text);
-          displayValue = Array.isArray(parsed)
-            ? parsed.join("、")
-            : ans.answer_text;
-        } catch {
-          displayValue = ans.answer_text;
+      // 格式化答案显示
+      const formattedAnswers = answers.map((ans) => {
+        let displayValue = "";
+        if (
+          ans.answer_text !== null &&
+          ans.answer_text !== undefined &&
+          ans.answer_text !== ""
+        ) {
+          try {
+            const parsed = JSON.parse(ans.answer_text);
+            displayValue = Array.isArray(parsed)
+              ? parsed.join("、")
+              : ans.answer_text;
+          } catch {
+            displayValue = ans.answer_text;
+          }
+        } else if (ans.answer_value !== null) {
+          displayValue = String(ans.answer_value);
         }
-      } else if (ans.answer_value !== null) {
-        displayValue = String(ans.answer_value);
-      }
-      // 选项文字和分数都有时，一起显示，如「完全没有（1分）」
-      if (
-        ans.answer_value !== null &&
-        ans.answer_text !== null &&
-        ans.answer_text !== ""
-      ) {
-        displayValue = `${displayValue}（${ans.answer_value}分）`;
-      }
+        // 选项文字和分数都有时，一起显示，如「完全没有（1分）」
+        if (
+          ans.answer_value !== null &&
+          ans.answer_text !== null &&
+          ans.answer_text !== ""
+        ) {
+          displayValue = `${displayValue}（${ans.answer_value}分）`;
+        }
 
-      return {
-        order_num: ans.order_num,
-        content: ans.content,
-        question_type: ans.question_type || "scale",
-        role: ans.role || "student",
-        display_value: displayValue,
-        answer_value: ans.answer_value,
-        answer_text: ans.answer_text,
-        duration_ms: ans.duration_ms,
-      };
-    });
+        return {
+          order_num: ans.order_num,
+          content: ans.content,
+          question_type: ans.question_type || "scale",
+          role: ans.role || "student",
+          display_value: displayValue,
+          answer_value: ans.answer_value,
+          answer_text: ans.answer_text,
+          duration_ms: ans.duration_ms,
+        };
+      });
 
-    res.json({
-      success: true,
-      submission: subRows[0],
-      answers: formattedAnswers,
-    });
-  } catch (err) {
-    console.error("获取答案详情失败:", err);
-    res.status(500).json({ success: false, message: "服务器错误" });
-  }
-});
+      res.json({
+        success: true,
+        submission: subRows[0],
+        answers: formattedAnswers,
+      });
+    } catch (err) {
+      console.error("获取答案详情失败:", err);
+      res.status(500).json({ success: false, message: "服务器错误" });
+    }
+  },
+);
 
 // 获取某份问卷的分数段配置
 app.get(
   "/api/questionnaires/:id/score-rules",
   verifyAdminToken,
+  requireAccess("questionnaire"),
   async (req, res) => {
     const questionnaireId = req.params.id;
     try {
@@ -2642,6 +2776,7 @@ app.get(
 app.post(
   "/api/questionnaires/:id/score-rules",
   verifyAdminToken,
+  requireAccess("questionnaire"),
   async (req, res) => {
     const questionnaireId = req.params.id;
     const { rules } = req.body;
@@ -2704,64 +2839,69 @@ app.post(
 );
 
 // 计算某次提交的分数段评价（用于回答记录详情展示）
-app.get("/api/submissions/:id/report", verifyAdminToken, async (req, res) => {
-  const submissionId = req.params.id;
-  try {
-    const connection = await mysql.createConnection(dbConfig);
+app.get(
+  "/api/submissions/:id/report",
+  verifyAdminToken,
+  requireAccess("submission"),
+  async (req, res) => {
+    const submissionId = req.params.id;
+    try {
+      const connection = await mysql.createConnection(dbConfig);
 
-    const [subRows] = await connection.execute(
-      "SELECT * FROM submissions WHERE id = ?",
-      [submissionId],
-    );
-    if (subRows.length === 0) {
+      const [subRows] = await connection.execute(
+        "SELECT * FROM submissions WHERE id = ?",
+        [submissionId],
+      );
+      if (subRows.length === 0) {
+        await connection.end();
+        return res
+          .status(404)
+          .json({ success: false, message: "提交记录不存在" });
+      }
+      const questionnaireId = subRows[0].questionnaire_id;
+
+      const { totalScore, dimensionScores } = await calcScore(
+        questionnaireId,
+        submissionId,
+        connection,
+      );
+
+      const [rules] = await connection.execute(
+        "SELECT * FROM score_rules WHERE questionnaire_id = ? ORDER BY min_score ASC",
+        [questionnaireId],
+      );
+      const { totalRule, dimensions } = matchScoreRules(
+        totalScore,
+        dimensionScores,
+        rules,
+      );
+
+      // 和常模比较（配置了常模、并且按基本信息匹配到了才有）
+      const norms = await loadNorms(connection, questionnaireId);
+      let norm = null;
+      if (norms.length > 0) {
+        norm = matchNorm(norms, await loadInfoMap(connection, submissionId));
+      }
+
       await connection.end();
-      return res
-        .status(404)
-        .json({ success: false, message: "提交记录不存在" });
+      res.json({
+        success: true,
+        total_score: totalScore,
+        dimension_scores: dimensions.map((d) => ({
+          ...d,
+          norm: normCompare(norm, `dim${d.id}`, d.score),
+        })), // 每个维度带 matched_rule
+        matched_rule: totalRule,
+        has_norms: norms.length > 0,
+        norm_name: norm ? norm.name : null,
+        total_norm: normCompare(norm, "total", totalScore),
+      });
+    } catch (err) {
+      console.error("获取报告失败:", err);
+      res.status(500).json({ success: false, message: "服务器错误" });
     }
-    const questionnaireId = subRows[0].questionnaire_id;
-
-    const { totalScore, dimensionScores } = await calcScore(
-      questionnaireId,
-      submissionId,
-      connection,
-    );
-
-    const [rules] = await connection.execute(
-      "SELECT * FROM score_rules WHERE questionnaire_id = ? ORDER BY min_score ASC",
-      [questionnaireId],
-    );
-    const { totalRule, dimensions } = matchScoreRules(
-      totalScore,
-      dimensionScores,
-      rules,
-    );
-
-    // 和常模比较（配置了常模、并且按基本信息匹配到了才有）
-    const norms = await loadNorms(connection, questionnaireId);
-    let norm = null;
-    if (norms.length > 0) {
-      norm = matchNorm(norms, await loadInfoMap(connection, submissionId));
-    }
-
-    await connection.end();
-    res.json({
-      success: true,
-      total_score: totalScore,
-      dimension_scores: dimensions.map((d) => ({
-        ...d,
-        norm: normCompare(norm, `dim${d.id}`, d.score),
-      })), // 每个维度带 matched_rule
-      matched_rule: totalRule,
-      has_norms: norms.length > 0,
-      norm_name: norm ? norm.name : null,
-      total_norm: normCompare(norm, "total", totalScore),
-    });
-  } catch (err) {
-    console.error("获取报告失败:", err);
-    res.status(500).json({ success: false, message: "服务器错误" });
-  }
-});
+  },
+);
 
 // 获取某份问卷的基本信息字段配置
 app.get("/api/questionnaires/:id/info-fields", async (req, res) => {
@@ -2855,6 +2995,17 @@ app.post("/api/submissions/:id/subject-info", async (req, res) => {
 
   try {
     const connection = await mysql.createConnection(dbConfig);
+    // 只能给还没有基本信息的提交保存一次，防止别人改写已有记录
+    const [exist] = await connection.execute(
+      "SELECT COUNT(*) AS n FROM subject_info WHERE submission_id = ?",
+      [submissionId],
+    );
+    if (exist[0].n > 0) {
+      await connection.end();
+      return res
+        .status(409)
+        .json({ success: false, message: "这次提交已经有基本信息了" });
+    }
     for (const item of info) {
       await connection.execute(
         "INSERT INTO subject_info (submission_id, field_key, field_label, value) VALUES (?, ?, ?, ?)",
@@ -2873,6 +3024,7 @@ app.post("/api/submissions/:id/subject-info", async (req, res) => {
 app.get(
   "/api/submissions/:id/subject-info",
   verifyAdminToken,
+  requireAccess("submission"),
   async (req, res) => {
     const submissionId = req.params.id;
     try {
@@ -4769,12 +4921,10 @@ app.post(
           (await checkQuestionnaireAccess(connection, qid, req.admin)) !== "ok"
         ) {
           await connection.end();
-          return res
-            .status(403)
-            .json({
-              success: false,
-              message: "没有权限复制其中某份问卷的题目",
-            });
+          return res.status(403).json({
+            success: false,
+            message: "没有权限复制其中某份问卷的题目",
+          });
         }
       }
 
@@ -5182,7 +5332,7 @@ app.delete("/api/option-templates/:id", verifyAdminToken, async (req, res) => {
 
 // 上传题目用的图片 / 视频 / 音频，返回文件地址
 app.post("/api/media", verifyAdminToken, (req, res) => {
-  mediaUpload.single("file")(req, res, (err) => {
+  mediaUpload.single("file")(req, res, async (err) => {
     if (err) {
       const tooLarge = err.code === "LIMIT_FILE_SIZE";
       return res.status(400).json({
@@ -5197,11 +5347,32 @@ app.post("/api/media", verifyAdminToken, (req, res) => {
           "不支持这种文件。图片支持 jpg/png/gif/webp，视频支持 mp4/webm/mov，音频支持 mp3/wav/m4a",
       });
     }
+    let filename = req.file.filename;
+    let warning = "";
+    // 视频：服务器有 ffmpeg 就转成所有浏览器都能播的 H.264 mp4；没有就检查是不是 H.265 并提醒
+    if (mediaTypeOf(filename) === "video") {
+      try {
+        if (await video.hasFfmpeg()) {
+          const out = await video.toWebMp4(req.file.path);
+          if (out) filename = path.basename(out);
+          else
+            warning =
+              "视频格式转换失败，部分浏览器可能放不了，建议换一个视频文件。";
+        } else if (video.looksLikeHevc(req.file.path)) {
+          warning =
+            "这个视频是 H.265（HEVC）编码：手机能播，但很多电脑浏览器只有声音没有画面。上线到服务器后会自动转换；本地测试可以先用剪映等软件导出为 H.264 格式再上传。";
+        }
+      } catch (e) {
+        console.error("处理视频失败:", e);
+      }
+    }
+    const full = path.join(UPLOAD_DIR, filename);
     res.json({
       success: true,
-      url: `/uploads/${req.file.filename}`,
-      type: mediaTypeOf(req.file.filename),
-      size: req.file.size,
+      url: `/uploads/${filename}`,
+      type: mediaTypeOf(filename),
+      size: fs.existsSync(full) ? fs.statSync(full).size : req.file.size,
+      warning,
     });
   });
 });
@@ -5234,6 +5405,8 @@ app.get("/api/server-info", verifyAdminToken, (req, res) => {
   res.json({ success: true, lan_ips: ips });
 });
 
-app.listen(PORT, () => {
-  console.log(`后端服务已启动，访问 http://localhost:${PORT}`);
+// 上线时只监听本机（HOST=127.0.0.1），外面只能通过 nginx 访问
+const HOST = process.env.HOST || undefined;
+app.listen(PORT, HOST, () => {
+  console.log(`后端服务已启动，访问 http://${HOST || "localhost"}:${PORT}`);
 });

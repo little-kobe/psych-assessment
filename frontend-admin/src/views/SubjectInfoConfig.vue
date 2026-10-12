@@ -2,6 +2,7 @@
 import { ref, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
+import { API_BASE } from "../api.js";
 
 const route = useRoute();
 const router = useRouter();
@@ -89,7 +90,7 @@ async function fetchFields() {
   const token = localStorage.getItem("admin_token");
   try {
     const res = await fetch(
-      `http://localhost:3000/api/questionnaires/${questionnaireId}/info-fields`,
+      `${API_BASE}/api/questionnaires/${questionnaireId}/info-fields`,
       { headers: { Authorization: `Bearer ${token}` } },
     );
     const data = await res.json();
@@ -179,7 +180,7 @@ async function saveFields() {
   const token = localStorage.getItem("admin_token");
   try {
     const res = await fetch(
-      `http://localhost:3000/api/questionnaires/${questionnaireId}/info-fields`,
+      `${API_BASE}/api/questionnaires/${questionnaireId}/info-fields`,
       {
         method: "POST",
         headers: {

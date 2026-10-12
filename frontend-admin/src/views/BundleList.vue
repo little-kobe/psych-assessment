@@ -1,11 +1,12 @@
 <script setup>
+import { API_BASE } from "../api.js";
 // 问卷组合列表（显示在左侧菜单「问卷组合」里）
 import { ref, onMounted } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import ShareLinkDialog from "../components/ShareLinkDialog.vue";
 
-const SERVER = "http://localhost:3000";
+const SERVER = API_BASE;
 const router = useRouter();
 const bundles = ref([]);
 const loading = ref(false);

@@ -1,4 +1,5 @@
 <script setup>
+import { API_BASE } from "../api.js";
 // 新建 / 编辑问卷组合：选择问卷、拖动排序、设置说明和开关
 import { ref, computed, onMounted, onBeforeUnmount, nextTick } from "vue";
 import { useRoute, useRouter } from "vue-router";
@@ -6,7 +7,7 @@ import { ElMessage } from "element-plus";
 import Sortable from "sortablejs";
 import ShareLinkDialog from "../components/ShareLinkDialog.vue";
 
-const SERVER = "http://localhost:3000";
+const SERVER = API_BASE;
 const route = useRoute();
 const router = useRouter();
 const isNew = route.params.id === "new";

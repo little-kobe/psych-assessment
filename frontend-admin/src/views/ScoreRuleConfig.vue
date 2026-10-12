@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
+import { API_BASE } from "../api.js";
 
 const route = useRoute();
 const router = useRouter();
@@ -27,7 +28,7 @@ async function fetchDimensions() {
   const token = localStorage.getItem("admin_token");
   try {
     const res = await fetch(
-      `http://localhost:3000/api/questionnaires/${questionnaireId}/dimensions`,
+      `${API_BASE}/api/questionnaires/${questionnaireId}/dimensions`,
       { headers: { Authorization: `Bearer ${token}` } },
     );
     const data = await res.json();
@@ -62,7 +63,7 @@ async function fetchRules() {
   const token = localStorage.getItem("admin_token");
   try {
     const res = await fetch(
-      `http://localhost:3000/api/questionnaires/${questionnaireId}/score-rules`,
+      `${API_BASE}/api/questionnaires/${questionnaireId}/score-rules`,
       { headers: { Authorization: `Bearer ${token}` } },
     );
     const data = await res.json();
@@ -114,7 +115,7 @@ async function saveRules() {
   const token = localStorage.getItem("admin_token");
   try {
     const res = await fetch(
-      `http://localhost:3000/api/questionnaires/${questionnaireId}/score-rules`,
+      `${API_BASE}/api/questionnaires/${questionnaireId}/score-rules`,
       {
         method: "POST",
         headers: {

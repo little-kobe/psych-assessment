@@ -1,9 +1,10 @@
 <script setup>
+import { API_BASE } from "../api.js";
 // 题目的图片 / 视频 / 音频：上传后显示在题目文字下方、选项上方，可以放多个，可以删除和调整顺序
 import { ref } from "vue";
 import { ElMessage } from "element-plus";
 
-const SERVER = "http://localhost:3000";
+const SERVER = API_BASE;
 const model = defineModel({ type: Array, default: () => [] });
 const uploading = ref(false);
 const fileInput = ref(null);
@@ -21,6 +22,14 @@ async function uploadFiles(event) {
   uploading.value = true;
   const token = localStorage.getItem("admin_token");
   const list = [...(model.value || [])];
+  if (files.some((f) => f.type.startsWith("video/"))) {
+    ElMessage({
+      type: "info",
+      message:
+        "视频上传后会转换成所有浏览器都能播的格式，大的视频可能要等一两分钟，请不要关闭页面",
+      duration: 6000,
+    });
+  }
   for (const file of files) {
     const form = new FormData();
     form.append("file", file);
@@ -33,6 +42,14 @@ async function uploadFiles(event) {
       const data = await res.json();
       if (data.success) {
         list.push({ type: data.type, url: data.url, name: file.name });
+        if (data.warning) {
+          ElMessage({
+            type: "warning",
+            message: `${file.name}：${data.warning}`,
+            duration: 10000,
+            showClose: true,
+          });
+        }
       } else {
         ElMessage.error(`${file.name}：${data.message}`);
       }

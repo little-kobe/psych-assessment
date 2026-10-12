@@ -1,6 +1,7 @@
 <script setup>
 import { ref, onMounted } from "vue";
 import { ElMessage, ElMessageBox } from "element-plus";
+import { API_BASE } from "../api.js";
 
 const admins = ref([]);
 const loading = ref(false);
@@ -25,7 +26,7 @@ async function fetchAdmins() {
   loading.value = true;
   const token = localStorage.getItem("admin_token");
   try {
-    const res = await fetch("http://localhost:3000/api/admins", {
+    const res = await fetch(`${API_BASE}/api/admins`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     const data = await res.json();
@@ -53,7 +54,7 @@ async function createAdmin() {
   creating.value = true;
   const token = localStorage.getItem("admin_token");
   try {
-    const res = await fetch("http://localhost:3000/api/admins", {
+    const res = await fetch(`${API_BASE}/api/admins`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -98,7 +99,7 @@ async function resetPassword() {
   const token = localStorage.getItem("admin_token");
   try {
     const res = await fetch(
-      `http://localhost:3000/api/admins/${resetTargetId.value}/password`,
+      `${API_BASE}/api/admins/${resetTargetId.value}/password`,
       {
         method: "PUT",
         headers: {
@@ -139,7 +140,7 @@ async function deleteAdmin(admin) {
 
   const token = localStorage.getItem("admin_token");
   try {
-    const res = await fetch(`http://localhost:3000/api/admins/${admin.id}`, {
+    const res = await fetch(`${API_BASE}/api/admins/${admin.id}`, {
       method: "DELETE",
       headers: { Authorization: `Bearer ${token}` },
     });

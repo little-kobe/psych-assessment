@@ -58,7 +58,8 @@ const routes = [
 ];
 
 const router = createRouter({
-  history: createWebHistory(),
+  // 上线后后台放在 /admin/ 下面（见 vite.config.js 的 base），本地开发还是根路径
+  history: createWebHistory(import.meta.env.BASE_URL),
   routes,
 });
 

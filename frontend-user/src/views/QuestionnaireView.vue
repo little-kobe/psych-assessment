@@ -889,8 +889,13 @@ const nextUnitInfo = computed(() => units.value[unitIndex.value + 1] || null);
           </div>
           <p class="question-text">{{ currentQuestion.content }}</p>
 
-          <!-- 题目的图片 / 视频 / 音频 -->
-          <div v-if="currentMedia.length > 0" class="q-media">
+          <!-- 题目的图片 / 视频 / 音频（屏蔽右键另存、拖动保存、下载按钮） -->
+          <div
+            v-if="currentMedia.length > 0"
+            class="q-media no-save"
+            @contextmenu.prevent
+            @dragstart.prevent
+          >
             <template v-for="m in currentMedia" :key="m.url">
               <img
                 v-if="m.type === 'image'"
@@ -904,6 +909,8 @@ const nextUnitInfo = computed(() => units.value[unitIndex.value + 1] || null);
                 :src="mediaUrl(m.url)"
                 class="q-media-video"
                 controls
+                controlslist="nodownload noplaybackrate noremoteplayback"
+                disablepictureinpicture
                 playsinline
                 preload="metadata"
               ></video>
@@ -912,6 +919,7 @@ const nextUnitInfo = computed(() => units.value[unitIndex.value + 1] || null);
                 :src="mediaUrl(m.url)"
                 class="q-media-audio"
                 controls
+                controlslist="nodownload noplaybackrate"
                 preload="metadata"
               ></audio>
             </template>
@@ -933,7 +941,9 @@ const nextUnitInfo = computed(() => units.value[unitIndex.value + 1] || null);
             <!-- 每个分数都配了图片：显示图片选项（如表情量表） -->
             <div
               v-if="scaleImageOptions(currentQuestion).length > 0"
-              class="image-options scale-images"
+              class="image-options scale-images no-save"
+              @contextmenu.prevent
+              @dragstart.prevent
               :style="scaleGridStyle(currentQuestion)"
             >
               <button
@@ -994,7 +1004,9 @@ const nextUnitInfo = computed(() => units.value[unitIndex.value + 1] || null);
               currentQuestion.question_type === 'single_choice' &&
               choiceHasImages(currentQuestion)
             "
-            class="image-options"
+            class="image-options no-save"
+            @contextmenu.prevent
+            @dragstart.prevent
           >
             <button
               v-for="opt in parseOptions(currentQuestion.options)"
@@ -1036,7 +1048,11 @@ const nextUnitInfo = computed(() => units.value[unitIndex.value + 1] || null);
             "
           >
             <p class="multi-hint">可多选</p>
-            <div class="image-options">
+            <div
+              class="image-options no-save"
+              @contextmenu.prevent
+              @dragstart.prevent
+            >
               <button
                 v-for="opt in parseOptions(currentQuestion.options)"
                 :key="opt.label"
@@ -1321,7 +1337,13 @@ const nextUnitInfo = computed(() => units.value[unitIndex.value + 1] || null);
     </div>
 
     <!-- 点开放大的图片 -->
-    <div v-if="zoomImage" class="zoom-mask" @click="zoomImage = ''">
+    <div
+      v-if="zoomImage"
+      class="zoom-mask no-save"
+      @click="zoomImage = ''"
+      @contextmenu.prevent
+      @dragstart.prevent
+    >
       <img :src="zoomImage" alt="放大的图片" />
       <span class="zoom-close">点任意处关闭</span>
     </div>
@@ -1526,6 +1548,14 @@ const nextUnitInfo = computed(() => units.value[unitIndex.value + 1] || null);
 .image-option.active .image-option-label {
   color: #2e7d32;
   font-weight: 600;
+}
+/* 图片、视频不让长按 / 拖动保存 */
+.no-save img,
+.no-save video {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-user-drag: none;
 }
 /* 放大图片 */
 .zoom-mask {

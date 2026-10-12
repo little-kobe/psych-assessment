@@ -6,8 +6,9 @@ import Sortable from "sortablejs";
 import MediaListEditor from "../components/MediaListEditor.vue";
 import OptionImage from "../components/OptionImage.vue";
 import CopyQuestionsDialog from "../components/CopyQuestionsDialog.vue";
+import { API_BASE } from "../api.js";
 
-const SERVER = "http://localhost:3000";
+const SERVER = API_BASE;
 
 const route = useRoute();
 const router = useRouter();
@@ -188,7 +189,7 @@ const customTemplates = ref([]); // 自己保存的模板（存在数据库里�
 async function fetchTemplates() {
   const token = localStorage.getItem("admin_token");
   try {
-    const res = await fetch("http://localhost:3000/api/option-templates", {
+    const res = await fetch(`${API_BASE}/api/option-templates`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     const data = await res.json();
@@ -256,7 +257,7 @@ async function saveAsTemplate() {
     return; // 点了取消
   }
   const token = localStorage.getItem("admin_token");
-  const res = await fetch("http://localhost:3000/api/option-templates", {
+  const res = await fetch(`${API_BASE}/api/option-templates`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -285,13 +286,10 @@ async function deleteTemplate(tpl) {
     return;
   }
   const token = localStorage.getItem("admin_token");
-  const res = await fetch(
-    `http://localhost:3000/api/option-templates/${tpl.id}`,
-    {
-      method: "DELETE",
-      headers: { Authorization: `Bearer ${token}` },
-    },
-  );
+  const res = await fetch(`${API_BASE}/api/option-templates/${tpl.id}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  });
   const data = await res.json();
   if (data.success) {
     ElMessage.success("模板已删除");
@@ -319,7 +317,7 @@ async function fetchQuestions() {
   const token = localStorage.getItem("admin_token");
   try {
     const res = await fetch(
-      `http://localhost:3000/api/questionnaires/${questionnaireId}`,
+      `${API_BASE}/api/questionnaires/${questionnaireId}`,
       {
         headers: { Authorization: `Bearer ${token}` },
       },
@@ -467,20 +465,17 @@ async function saveQuestion() {
   try {
     let res;
     if (editingId.value) {
-      res = await fetch(
-        `http://localhost:3000/api/questions/${editingId.value}`,
-        {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify(payload),
+      res = await fetch(`${API_BASE}/api/questions/${editingId.value}`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
         },
-      );
+        body: JSON.stringify(payload),
+      });
     } else {
       res = await fetch(
-        `http://localhost:3000/api/questionnaires/${questionnaireId}/questions`,
+        `${API_BASE}/api/questionnaires/${questionnaireId}/questions`,
         {
           method: "POST",
           headers: {
@@ -523,7 +518,7 @@ async function deleteQuestion(q) {
 
   const token = localStorage.getItem("admin_token");
   try {
-    const res = await fetch(`http://localhost:3000/api/questions/${q.id}`, {
+    const res = await fetch(`${API_BASE}/api/questions/${q.id}`, {
       method: "DELETE",
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -564,7 +559,7 @@ async function saveOrder(arr) {
   const orders = arr.map((q, i) => ({ id: q.id, order_num: i + 1 }));
   try {
     const res = await fetch(
-      `http://localhost:3000/api/questionnaires/${questionnaireId}/questions/reorder`,
+      `${API_BASE}/api/questionnaires/${questionnaireId}/questions/reorder`,
       {
         method: "PUT",
         headers: {
@@ -725,8 +720,8 @@ async function saveSection() {
   }
   const token = localStorage.getItem("admin_token");
   const url = editingSectionId.value
-    ? `http://localhost:3000/api/sections/${editingSectionId.value}`
-    : `http://localhost:3000/api/questionnaires/${questionnaireId}/sections`;
+    ? `${API_BASE}/api/sections/${editingSectionId.value}`
+    : `${API_BASE}/api/questionnaires/${questionnaireId}/sections`;
   const res = await fetch(url, {
     method: editingSectionId.value ? "PUT" : "POST",
     headers: {
@@ -756,7 +751,7 @@ async function deleteSection(sec) {
     return;
   }
   const token = localStorage.getItem("admin_token");
-  const res = await fetch(`http://localhost:3000/api/sections/${sec.id}`, {
+  const res = await fetch(`${API_BASE}/api/sections/${sec.id}`, {
     method: "DELETE",
     headers: { Authorization: `Bearer ${token}` },
   });

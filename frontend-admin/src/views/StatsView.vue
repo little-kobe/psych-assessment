@@ -3,6 +3,7 @@ import { ref, computed, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import BarChart from "../components/BarChart.vue";
+import { API_BASE } from "../api.js";
 
 const route = useRoute();
 const router = useRouter();
@@ -41,7 +42,7 @@ async function fetchStats() {
   const params = queryParams();
   try {
     const res = await fetch(
-      `http://localhost:3000/api/questionnaires/${questionnaireId}/stats?${params}`,
+      `${API_BASE}/api/questionnaires/${questionnaireId}/stats?${params}`,
       { headers: { Authorization: `Bearer ${token}` } },
     );
     const data = await res.json();
@@ -147,7 +148,7 @@ async function exportStats() {
   const token = localStorage.getItem("admin_token");
   try {
     const res = await fetch(
-      `http://localhost:3000/api/questionnaires/${questionnaireId}/stats/export?${queryParams()}`,
+      `${API_BASE}/api/questionnaires/${questionnaireId}/stats/export?${queryParams()}`,
       { headers: { Authorization: `Bearer ${token}` } },
     );
     if (!res.ok) throw new Error();
@@ -544,9 +545,7 @@ onMounted(fetchStats);
             − 常模平均）÷ 常模标准差。
             <template v-if="normCompare.unmatched > 0"
               >另有
-              {{
-                normCompare.unmatched
-              }}
+              {{ normCompare.unmatched }}
               份作答没有匹配到常模，未计入。</template
             >
           </p>

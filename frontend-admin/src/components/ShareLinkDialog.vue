@@ -1,4 +1,5 @@
 <script setup>
+import { API_BASE } from "../api.js";
 // 生成答题链接和二维码（单份问卷、问卷组合共用）
 import { ref, watch } from "vue";
 import { ElMessage } from "element-plus";
@@ -11,7 +12,9 @@ const props = defineProps({
 });
 const visible = defineModel({ type: Boolean, default: false });
 
-// 链接里用的主机地址：默认用电脑的局域网 IP（手机扫码才能打开），也可以切换成 localhost 只在本机测试
+// 上线后（npm run build）：答题链接就是当前网站的地址（如 http://服务器IP/q/3），不用选
+// 本地开发时：链接里用的主机地址默认用电脑的局域网 IP（手机扫码才能打开），也可以切换成 localhost 只在本机测试
+const IS_DEV = import.meta.env.DEV;
 const linkHost = ref("localhost");
 const lanIps = ref([]);
 const groupName = ref("");
@@ -22,7 +25,7 @@ async function fetchLanIps() {
   if (lanIps.value.length > 0) return; // 只需要取一次
   const token = localStorage.getItem("admin_token");
   try {
-    const res = await fetch("http://localhost:3000/api/server-info", {
+    const res = await fetch(`${API_BASE}/api/server-info`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     const data = await res.json();
@@ -36,7 +39,9 @@ async function fetchLanIps() {
 }
 
 async function generate() {
-  const base = `http://${linkHost.value}:5173${props.path}`;
+  const base = IS_DEV
+    ? `http://${linkHost.value}:5173${props.path}`
+    : `${window.location.origin}${props.path}`;
   generatedLink.value = groupName.value
     ? `${base}?group=${encodeURIComponent(groupName.value)}`
     : base;
@@ -50,7 +55,7 @@ async function generate() {
 watch(visible, async (open) => {
   if (!open) return;
   groupName.value = "";
-  await fetchLanIps();
+  if (IS_DEV) await fetchLanIps();
   generate();
 });
 
@@ -81,7 +86,7 @@ function copyLink() {
       </p>
 
       <el-form label-width="80px">
-        <el-form-item label="链接地址">
+        <el-form-item v-if="IS_DEV" label="链接地址">
           <el-select v-model="linkHost" style="width: 100%" @change="generate">
             <el-option
               v-for="ip in lanIps"
@@ -121,7 +126,7 @@ function copyLink() {
         </div>
       </div>
       <el-alert
-        v-if="linkHost === 'localhost'"
+        v-if="IS_DEV && linkHost === 'localhost'"
         type="warning"
         :closable="false"
         show-icon

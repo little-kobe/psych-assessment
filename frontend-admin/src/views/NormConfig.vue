@@ -1,10 +1,11 @@
 <script setup>
+import { API_BASE } from "../api.js";
 // 常模设置：录入量表手册 / 文献里的常模均值和标准差，可以按性别、年级等分成几套
 import { ref, computed, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 
-const SERVER = "http://localhost:3000";
+const SERVER = API_BASE;
 const route = useRoute();
 const router = useRouter();
 const questionnaireId = route.params.id;

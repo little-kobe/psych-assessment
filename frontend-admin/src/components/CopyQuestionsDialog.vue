@@ -1,9 +1,10 @@
 <script setup>
+import { API_BASE } from "../api.js";
 // 从其他问卷复制题目：可以同时选几份问卷，勾选其中的部分或全部题目，复制到当前问卷的最后
 import { ref, computed, watch } from "vue";
 import { ElMessage } from "element-plus";
 
-const SERVER = "http://localhost:3000";
+const SERVER = API_BASE;
 const props = defineProps({
   targetId: { type: [Number, String], required: true }, // 复制到哪份问卷
 });

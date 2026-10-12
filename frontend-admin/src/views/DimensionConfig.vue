@@ -2,6 +2,7 @@
 import { ref, onMounted, computed } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
+import { API_BASE } from "../api.js";
 
 const route = useRoute();
 const router = useRouter();
@@ -109,7 +110,7 @@ async function fetchData() {
   const token = localStorage.getItem("admin_token");
   try {
     const qRes = await fetch(
-      `http://localhost:3000/api/questionnaires/${questionnaireId}`,
+      `${API_BASE}/api/questionnaires/${questionnaireId}`,
       {
         headers: { Authorization: `Bearer ${token}` },
       },
@@ -121,7 +122,7 @@ async function fetchData() {
     }
 
     const dRes = await fetch(
-      `http://localhost:3000/api/questionnaires/${questionnaireId}/dimensions`,
+      `${API_BASE}/api/questionnaires/${questionnaireId}/dimensions`,
       {
         headers: { Authorization: `Bearer ${token}` },
       },
@@ -235,7 +236,7 @@ async function saveDimensions() {
   const token = localStorage.getItem("admin_token");
   try {
     const response = await fetch(
-      `http://localhost:3000/api/questionnaires/${questionnaireId}/dimensions`,
+      `${API_BASE}/api/questionnaires/${questionnaireId}/dimensions`,
       {
         method: "POST",
         headers: {
