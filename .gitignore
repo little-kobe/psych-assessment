@@ -7,3 +7,5 @@ backend/uploads/
 backend/.env
 # 服务器上的打包配置（如备案号 VITE_ICP_NO），只放在服务器上
 *.local
+# 从 Navicat 导出的整库文件（含作答数据），只放在自己电脑上，不传 GitHub
+/*.sql

@@ -313,18 +313,42 @@ async function calcDimensionAverages(
   return { averages, sampleSize };
 }
 
+// 在同一个指标（总分或某个维度）的分数段里找分数属于哪一段
+// 分数段一般按整数写（如 5-10、11-20），但均值型维度、或总分里含均值型维度时会出现小数（如 10.75），
+// 落在两段之间的空隙里。这时按「还没到下一段的下限」算作下面那一段（10.75 → 5-10）；
+// 低于最低一段、高于最高一段的分数仍然不匹配
+function findScoreRule(score, list) {
+  if (score === null || score === undefined || list.length === 0) return null;
+  const exact = list.find(
+    (r) => score >= Number(r.min_score) && score <= Number(r.max_score),
+  );
+  if (exact) return exact;
+  const hasHigher = list.some((r) => Number(r.min_score) > score);
+  if (!hasHigher) return null;
+  let below = null;
+  list.forEach((r) => {
+    if (
+      Number(r.max_score) < score &&
+      (!below || Number(r.max_score) > Number(below.max_score))
+    ) {
+      below = r;
+    }
+  });
+  return below;
+}
+
 // 给总分和各维度匹配分数段：dimension_id 为空的规则按总分匹配，有值的按对应维度匹配
 function matchScoreRules(totalScore, dimensionScores, rules) {
-  const inRange = (score, r) =>
-    score !== null &&
-    score >= Number(r.min_score) &&
-    score <= Number(r.max_score);
-  const totalRule =
-    rules.find((r) => !r.dimension_id && inRange(totalScore, r)) || null;
+  const totalRule = findScoreRule(
+    totalScore,
+    rules.filter((r) => !r.dimension_id),
+  );
   const dimensions = dimensionScores.map((d) => ({
     ...d,
-    matched_rule:
-      rules.find((r) => r.dimension_id === d.id && inRange(d.score, r)) || null,
+    matched_rule: findScoreRule(
+      d.score,
+      rules.filter((r) => r.dimension_id === d.id),
+    ),
   }));
   return { totalRule, dimensions };
 }
@@ -3274,9 +3298,8 @@ async function computeStats(connection, questionnaireId, admin, opts) {
     }));
     let unmatched = 0;
     values.forEach((v) => {
-      const idx = list.findIndex(
-        (r) => v >= Number(r.min_score) && v <= Number(r.max_score),
-      );
+      // 和受测者看到的评价用同一套匹配规则（落在两段之间的小数归下面那一段）
+      const idx = list.indexOf(findScoreRule(v, list));
       if (idx === -1) unmatched++;
       else bands[idx].count++;
     });

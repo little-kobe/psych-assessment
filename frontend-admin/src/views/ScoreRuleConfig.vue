@@ -19,6 +19,40 @@ const visibleRules = computed(() =>
   rules.value.filter((r) => (r.dimension_id || 0) === activeTarget.value),
 );
 
+// 当前标签页的分数段之间有没有空隙、重叠，给研究者说明会怎么算
+// （和后端 findScoreRule 的规则一致：空隙里的小数归下面那一段，重叠的分数归下限更小的那一段）
+const rangeNotes = computed(() => {
+  const name = (r) => `「${r.label || "未命名"}」`;
+  const list = visibleRules.value
+    .filter(
+      (r) =>
+        r.min_score !== null &&
+        r.max_score !== null &&
+        Number(r.min_score) <= Number(r.max_score),
+    )
+    .slice()
+    .sort((a, b) => Number(a.min_score) - Number(b.min_score));
+  const notes = [];
+  for (let i = 1; i < list.length; i++) {
+    const a = list[i - 1];
+    const b = list[i];
+    const aMax = Number(a.max_score);
+    const bMin = Number(b.min_score);
+    if (bMin > aMax) {
+      notes.push(
+        `${aMax} 和 ${bMin} 之间有空隙：带小数的分数（如 ${Math.round(((aMax + bMin) / 2) * 100) / 100}）会落进去，算作下面的${name(a)}。`,
+      );
+    } else if (bMin === aMax) {
+      notes.push(`${aMax} 分同时在${name(a)}和${name(b)}里，算作${name(a)}。`);
+    } else {
+      notes.push(
+        `${name(a)}和${name(b)}重叠（${bMin}～${aMax}），重叠部分算作${name(a)}，建议改成首尾相接。`,
+      );
+    }
+  }
+  return notes;
+});
+
 // 某个对象（总分/维度）已经配置了几个分数段
 function ruleCount(target) {
   return rules.value.filter((r) => (r.dimension_id || 0) === target).length;
@@ -180,6 +214,22 @@ onMounted(() => {
       这份问卷还没有配置维度，目前只能按总分设置。需要维度报告请先到「配置维度」页面添加维度。
     </p>
 
+    <el-alert
+      v-if="rangeNotes.length > 0"
+      type="warning"
+      :closable="false"
+      show-icon
+      class="range-notes"
+      title="分数段之间的衔接"
+    >
+      <p v-for="(n, i) in rangeNotes" :key="i" class="range-note">{{ n }}</p>
+      <p class="range-note muted">
+        均值型维度，或总分里含均值型维度时，得分会带小数。想让空隙里的分数算上面那一段，就把上面那一段的下限改成和下面那一段的上限相同（例如把
+        5-10、11-20 改成 5-10、10-20：10 到 11 之间的小数就算上面那一段，正好 10
+        分仍算下面那一段）。
+      </p>
+    </el-alert>
+
     <div v-if="visibleRules.length === 0 && !loading">
       <el-empty
         description="还没有分数段配置，点击右上角「添加分数段」开始配置"
@@ -304,6 +354,18 @@ onMounted(() => {
   font-size: 12px;
   color: #999;
   margin: -8px 0 16px;
+}
+.range-notes {
+  margin-bottom: 16px;
+}
+.range-note {
+  margin: 2px 0;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.range-note.muted {
+  color: #999;
+  font-size: 12px;
 }
 .preset-row {
   display: flex;
