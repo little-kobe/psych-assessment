@@ -251,6 +251,34 @@ function formatOptions(options) {
     .join(" / ");
 }
 
+// 题目有没有图片、视频（题干或选项）
+function hasMedia(q) {
+  let m = q.media;
+  if (typeof m === "string") {
+    try {
+      m = JSON.parse(m);
+    } catch {
+      m = null;
+    }
+  }
+  if (Array.isArray(m) && m.length > 0) return true;
+  let opts = q.options;
+  if (typeof opts === "string") {
+    try {
+      opts = JSON.parse(opts);
+    } catch {
+      opts = [];
+    }
+  }
+  return Array.isArray(opts) && opts.some((o) => o && o.image);
+}
+
+// 和常模比较的一句话，如「T = 63，约高于常模中 90% 的人」
+function normText(n) {
+  if (!n) return "";
+  return `T = ${n.t}，约高于常模中 ${n.percentile}% 的人（常模 ${n.mean} ± ${n.sd}）`;
+}
+
 function goImport() {
   router.push(`/import?qid=${questionnaireId}`);
 }
@@ -305,6 +333,13 @@ onMounted(fetchDetail);
             @click="router.push(`/questionnaire/${questionnaireId}/dimensions`)"
           >
             <span>配置维度</span>
+          </el-button>
+          <el-button
+            size="small"
+            plain
+            @click="router.push(`/questionnaire/${questionnaireId}/norms`)"
+          >
+            <span>常模</span>
           </el-button>
           <el-divider direction="vertical" />
           <el-button
@@ -365,7 +400,18 @@ onMounted(fetchDetail);
         <el-tab-pane label="题目列表" name="questions">
           <el-table :data="questions" v-if="questions.length > 0">
             <el-table-column prop="order_num" label="序号" width="70" />
-            <el-table-column prop="content" label="题目内容" min-width="180" />
+            <el-table-column label="题目内容" min-width="180">
+              <template #default="scope">
+                {{ scope.row.content }}
+                <el-tag
+                  v-if="hasMedia(scope.row)"
+                  size="small"
+                  type="success"
+                  style="margin-left: 4px"
+                  >🖼 有图片/视频</el-tag
+                >
+              </template>
+            </el-table-column>
             <el-table-column label="题型" width="100">
               <template #default="scope">
                 <el-tag size="small" type="primary">
@@ -445,7 +491,18 @@ onMounted(fetchDetail);
 
           <div v-loading="submissionsLoading">
             <el-table :data="submissions" v-if="submissions.length > 0">
-              <el-table-column prop="id" label="编号" width="70" />
+              <el-table-column label="编号" width="90">
+                <template #default="scope">
+                  {{ scope.row.id }}
+                  <el-tooltip
+                    v-if="scope.row.bundle_id"
+                    content="通过问卷组合链接作答"
+                    placement="top"
+                  >
+                    <el-tag size="small" type="info">组合</el-tag>
+                  </el-tooltip>
+                </template>
+              </el-table-column>
               <el-table-column label="分组" width="100">
                 <template #default="scope">
                   <el-tag
@@ -682,6 +739,35 @@ onMounted(fetchDetail);
             class="report-block no-match"
           >
             总分 {{ reportDetail.total_score }} 分，未匹配到任何分数段配置
+          </div>
+
+          <!-- 和常模比较 -->
+          <div v-if="reportDetail && reportDetail.has_norms" class="norm-block">
+            <div class="norm-title">
+              和常模比较<template v-if="reportDetail.norm_name"
+                >（使用「{{ reportDetail.norm_name }}」）</template
+              >
+            </div>
+            <template v-if="reportDetail.norm_name">
+              <div v-if="reportDetail.total_norm" class="norm-line">
+                <span class="norm-key"
+                  >总分 {{ reportDetail.total_score }}</span
+                >
+                {{ normText(reportDetail.total_norm) }}
+              </div>
+              <template
+                v-for="d in reportDetail.dimension_scores"
+                :key="d.name"
+              >
+                <div v-if="d.norm" class="norm-line">
+                  <span class="norm-key">{{ d.name }} {{ d.score }}</span>
+                  {{ normText(d.norm) }}
+                </div>
+              </template>
+            </template>
+            <div v-else class="norm-line muted">
+              按这个人填的基本信息，没有匹配到适用的常模。
+            </div>
           </div>
 
           <!-- 各维度得分和评价 -->
@@ -1003,5 +1089,31 @@ onMounted(fetchDetail);
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
+}
+.norm-block {
+  margin: 10px 0;
+  padding: 10px 14px;
+  background: #f4f8fd;
+  border: 1px solid #dbe7f6;
+  border-radius: 8px;
+}
+.norm-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #2f5d8a;
+  margin-bottom: 6px;
+}
+.norm-line {
+  font-size: 13px;
+  color: #444;
+  line-height: 1.8;
+}
+.norm-line.muted {
+  color: #999;
+}
+.norm-key {
+  display: inline-block;
+  min-width: 110px;
+  color: #2f5d8a;
 }
 </style>

@@ -1,31 +1,11 @@
 <script setup>
 import { ref, onMounted } from "vue";
 import { useRouter } from "vue-router";
-import { ElMessage } from "element-plus";
-import QRCode from "qrcode";
+import ShareLinkDialog from "../components/ShareLinkDialog.vue";
+import BundleList from "./BundleList.vue";
 
 const router = useRouter();
 
-// 链接里用的主机地址：默认用电脑的局域网 IP（手机扫码才能打开），也可以切换成 localhost 只在本机测试
-const linkHost = ref("localhost");
-const lanIps = ref([]);
-
-async function fetchLanIps() {
-  if (lanIps.value.length > 0) return; // 只需要取一次
-  const token = localStorage.getItem("admin_token");
-  try {
-    const res = await fetch("http://localhost:3000/api/server-info", {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    const data = await res.json();
-    if (data.success && data.lan_ips.length > 0) {
-      lanIps.value = data.lan_ips;
-      linkHost.value = data.lan_ips[0];
-    }
-  } catch (err) {
-    console.error("获取局域网地址失败:", err);
-  }
-}
 const displayName = ref("");
 const role = ref("");
 
@@ -86,52 +66,12 @@ async function createQuestionnaire() {
   }
 }
 
-const showGroupDialog = ref(false);
-const currentLinkQid = ref(null);
-const groupName = ref("");
-const generatedLink = ref("");
-const qrDataUrl = ref(""); // 二维码图片（base64）
-
-async function openGroupLink(questionnaireId) {
-  currentLinkQid.value = questionnaireId;
-  groupName.value = "";
-  showGroupDialog.value = true;
-  await fetchLanIps();
-  generateGroupLink();
-}
-
-async function generateGroupLink() {
-  const base = `http://${linkHost.value}:5173/q/${currentLinkQid.value}`;
-  generatedLink.value = groupName.value
-    ? `${base}?group=${encodeURIComponent(groupName.value)}`
-    : base;
-  // 链接变了，二维码跟着重新生成
-  qrDataUrl.value = await QRCode.toDataURL(generatedLink.value, {
-    width: 240,
-    margin: 1,
-  });
-}
-
-function downloadQrCode() {
-  const a = document.createElement("a");
-  a.href = qrDataUrl.value;
-  a.download = `问卷${currentLinkQid.value}${
-    groupName.value ? "_" + groupName.value : ""
-  }_二维码.png`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-}
-
-function copyGeneratedLink() {
-  navigator.clipboard
-    .writeText(generatedLink.value)
-    .then(() => {
-      ElMessage.success("链接已复制");
-    })
-    .catch(() => {
-      ElMessage.error("复制失败，请手动复制");
-    });
+// 生成链接和二维码
+const showLinkDialog = ref(false);
+const linkQid = ref(null);
+function openGroupLink(questionnaireId) {
+  linkQid.value = questionnaireId;
+  showLinkDialog.value = true;
 }
 
 function goImport(questionnaireId) {
@@ -177,6 +117,9 @@ const roleLabel = () => (role.value === "supervisor" ? "导师" : "研究者");
         <el-menu-item index="/">
           <span>问卷管理</span>
         </el-menu-item>
+        <el-menu-item index="/bundles">
+          <span>问卷组合</span>
+        </el-menu-item>
         <el-menu-item v-if="role === 'supervisor'" index="/admin-manage">
           <span>账号管理</span>
         </el-menu-item>
@@ -197,176 +140,108 @@ const roleLabel = () => (role.value === "supervisor" ? "导师" : "研究者");
       </el-header>
 
       <el-main class="main">
-        <div class="toolbar">
-          <h2>问卷列表</h2>
-          <el-button type="primary" @click="showCreateDialog = true"
-            >新建问卷</el-button
-          >
-        </div>
-
-        <el-table
-          :data="questionnaires"
-          v-loading="loading"
-          style="width: 100%"
-        >
-          <el-table-column label="问卷标题">
-            <template #default="scope">
-              <el-link
-                type="primary"
-                @click="$router.push(`/questionnaire/${scope.row.id}`)"
-                >{{ scope.row.title }}</el-link
-              >
-            </template>
-          </el-table-column>
-          <el-table-column prop="creator_name" label="创建人" width="120" />
-          <el-table-column prop="question_count" label="题目数" width="90" />
-          <el-table-column label="记录时长" width="100">
-            <template #default="scope">
-              <el-tag
-                :type="scope.row.track_timing ? 'success' : 'info'"
-                size="small"
-              >
-                {{ scope.row.track_timing ? "已开启" : "未开启" }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="操作" width="280">
-            <template #default="scope">
-              <div class="action-btns">
-                <el-button
-                  size="small"
-                  type="primary"
-                  plain
-                  @click="$router.push(`/questionnaire/${scope.row.id}`)"
-                  >详情</el-button
-                >
-                <el-button
-                  size="small"
-                  type="success"
-                  plain
-                  @click="openGroupLink(scope.row.id)"
-                  >生成链接</el-button
-                >
-                <el-button size="small" @click="goImport(scope.row.id)"
-                  >导入题目</el-button
-                >
-              </div>
-            </template>
-          </el-table-column>
-        </el-table>
-
-        <el-dialog v-model="showCreateDialog" title="新建问卷" width="420px">
-          <el-form :model="newQuestionnaire" label-width="90px">
-            <el-form-item label="问卷标题">
-              <el-input
-                v-model="newQuestionnaire.title"
-                placeholder="例如：SCL-90症状自评量表"
-              />
-            </el-form-item>
-            <el-form-item label="问卷说明">
-              <el-input
-                v-model="newQuestionnaire.description"
-                type="textarea"
-                :rows="2"
-                placeholder="简要说明本问卷的用途"
-              />
-            </el-form-item>
-            <el-form-item label="知情同意">
-              <el-input
-                v-model="newQuestionnaire.consent_text"
-                type="textarea"
-                :rows="4"
-                placeholder="填写受测者答题前需阅读的知情同意说明，例如：本问卷用于学术研究，所有数据匿名保存，参与完全自愿..."
-              />
-            </el-form-item>
-            <el-form-item label="记录时长">
-              <el-switch v-model="newQuestionnaire.track_timing" />
-            </el-form-item>
-          </el-form>
-          <template #footer>
-            <el-button @click="showCreateDialog = false">取消</el-button>
-            <el-button type="primary" @click="createQuestionnaire"
-              >确认创建</el-button
+        <!-- 左侧菜单选「问卷组合」时 -->
+        <BundleList v-if="$route.path === '/bundles'" />
+        <template v-else>
+          <div class="toolbar">
+            <h2>问卷列表</h2>
+            <el-button type="primary" @click="showCreateDialog = true"
+              >新建问卷</el-button
             >
-          </template>
-        </el-dialog>
-        <!-- 生成分组链接弹窗 -->
-        <el-dialog v-model="showGroupDialog" title="生成问卷链接" width="520px">
-          <div class="link-dialog">
-            <p class="link-hint">
-              可以为不同群体生成带分组标记的链接，方便数据分析时做组间比较。
-            </p>
-
-            <el-form label-width="80px">
-              <el-form-item label="链接地址">
-                <el-select
-                  v-model="linkHost"
-                  style="width: 100%"
-                  @change="generateGroupLink"
-                >
-                  <el-option
-                    v-for="ip in lanIps"
-                    :key="ip"
-                    :value="ip"
-                    :label="`${ip}（局域网，手机可扫码）`"
-                  />
-                  <el-option
-                    value="localhost"
-                    label="localhost（仅本机测试）"
-                  />
-                </el-select>
-              </el-form-item>
-              <el-form-item label="分组名称">
-                <el-input
-                  v-model="groupName"
-                  placeholder="如：A班、实验组、男生组（不填则为无分组）"
-                  @input="generateGroupLink"
-                  clearable
-                />
-              </el-form-item>
-            </el-form>
-
-            <div class="link-preview">
-              <div class="link-label">生成的链接：</div>
-              <div class="link-text">{{ generatedLink }}</div>
-              <el-button size="small" type="primary" @click="copyGeneratedLink"
-                >复制链接</el-button
-              >
-            </div>
-
-            <!-- 二维码 -->
-            <div v-if="qrDataUrl" class="qr-box">
-              <img :src="qrDataUrl" alt="问卷二维码" class="qr-img" />
-              <div class="qr-side">
-                <p>手机扫码即可填写，分组名称会一起带上。</p>
-                <el-button size="small" @click="downloadQrCode"
-                  >下载二维码图片</el-button
-                >
-              </div>
-            </div>
-            <el-alert
-              v-if="linkHost === 'localhost'"
-              type="warning"
-              :closable="false"
-              show-icon
-              title="localhost 地址只能在本机打开，手机扫码打不开"
-              description="手机测试请在「链接地址」里选局域网 IP，并确保手机和电脑连的是同一个 Wi-Fi。"
-            />
-
-            <div class="link-tips">
-              <p>💡 使用建议：</p>
-              <ul>
-                <li>给A班同学发：<code>...?group=A班</code></li>
-                <li>给B班同学发：<code>...?group=B班</code></li>
-                <li>导出数据时，每条记录会自动带上对应的分组标签</li>
-              </ul>
-            </div>
           </div>
 
-          <template #footer>
-            <el-button @click="showGroupDialog = false">关闭</el-button>
-          </template>
-        </el-dialog>
+          <el-table
+            :data="questionnaires"
+            v-loading="loading"
+            style="width: 100%"
+          >
+            <el-table-column label="问卷标题">
+              <template #default="scope">
+                <el-link
+                  type="primary"
+                  @click="$router.push(`/questionnaire/${scope.row.id}`)"
+                  >{{ scope.row.title }}</el-link
+                >
+              </template>
+            </el-table-column>
+            <el-table-column prop="creator_name" label="创建人" width="120" />
+            <el-table-column prop="question_count" label="题目数" width="90" />
+            <el-table-column label="记录时长" width="100">
+              <template #default="scope">
+                <el-tag
+                  :type="scope.row.track_timing ? 'success' : 'info'"
+                  size="small"
+                >
+                  {{ scope.row.track_timing ? "已开启" : "未开启" }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="280">
+              <template #default="scope">
+                <div class="action-btns">
+                  <el-button
+                    size="small"
+                    type="primary"
+                    plain
+                    @click="$router.push(`/questionnaire/${scope.row.id}`)"
+                    >详情</el-button
+                  >
+                  <el-button
+                    size="small"
+                    type="success"
+                    plain
+                    @click="openGroupLink(scope.row.id)"
+                    >生成链接</el-button
+                  >
+                  <el-button size="small" @click="goImport(scope.row.id)"
+                    >导入题目</el-button
+                  >
+                </div>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <el-dialog v-model="showCreateDialog" title="新建问卷" width="420px">
+            <el-form :model="newQuestionnaire" label-width="90px">
+              <el-form-item label="问卷标题">
+                <el-input
+                  v-model="newQuestionnaire.title"
+                  placeholder="例如：SCL-90症状自评量表"
+                />
+              </el-form-item>
+              <el-form-item label="问卷说明">
+                <el-input
+                  v-model="newQuestionnaire.description"
+                  type="textarea"
+                  :rows="2"
+                  placeholder="简要说明本问卷的用途"
+                />
+              </el-form-item>
+              <el-form-item label="知情同意">
+                <el-input
+                  v-model="newQuestionnaire.consent_text"
+                  type="textarea"
+                  :rows="4"
+                  placeholder="填写受测者答题前需阅读的知情同意说明，例如：本问卷用于学术研究，所有数据匿名保存，参与完全自愿..."
+                />
+              </el-form-item>
+              <el-form-item label="记录时长">
+                <el-switch v-model="newQuestionnaire.track_timing" />
+              </el-form-item>
+            </el-form>
+            <template #footer>
+              <el-button @click="showCreateDialog = false">取消</el-button>
+              <el-button type="primary" @click="createQuestionnaire"
+                >确认创建</el-button
+              >
+            </template>
+          </el-dialog>
+          <ShareLinkDialog
+            v-model="showLinkDialog"
+            :path="`/q/${linkQid}`"
+            :file-name="`问卷${linkQid}`"
+          />
+        </template>
       </el-main>
     </el-container>
   </el-container>
@@ -440,76 +315,5 @@ const roleLabel = () => (role.value === "supervisor" ? "导师" : "研究者");
   margin: 0;
   font-size: 18px;
   color: #3d2b12;
-}
-.link-dialog {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-.link-hint {
-  font-size: 13px;
-  color: #888;
-  margin: 0;
-}
-.link-preview {
-  background: #f9f9f9;
-  border-radius: 8px;
-  padding: 12px 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.link-label {
-  font-size: 12px;
-  color: #999;
-}
-.link-text {
-  font-size: 13px;
-  color: #3d2b12;
-  word-break: break-all;
-  background: white;
-  padding: 8px 10px;
-  border-radius: 6px;
-  border: 1px solid #eee;
-}
-.qr-box {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  background: #f9f9f9;
-  border-radius: 8px;
-  padding: 12px 14px;
-}
-.qr-img {
-  width: 140px;
-  height: 140px;
-  border: 1px solid #eee;
-  border-radius: 6px;
-  background: white;
-}
-.qr-side p {
-  font-size: 13px;
-  color: #666;
-  margin: 0 0 10px;
-}
-.link-tips {
-  font-size: 12px;
-  color: #999;
-}
-.link-tips p {
-  margin: 0 0 4px;
-}
-.link-tips ul {
-  margin: 0;
-  padding-left: 16px;
-}
-.link-tips li {
-  margin-bottom: 4px;
-}
-.link-tips code {
-  background: #f0f0f0;
-  padding: 1px 6px;
-  border-radius: 4px;
-  color: #666;
 }
 </style>

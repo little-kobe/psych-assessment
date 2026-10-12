@@ -1,9 +1,11 @@
 -- 心理测评平台 数据库表结构（仅结构，不含数据）
 -- 包含 2026-09 升级新增的：option_templates、question_sections 表，
 -- questions.section_id、score_rules.dimension_id、questionnaires.show_report_chart 列
+-- 包含 2026-10 第8轮新增的：norms 表；bundles.consent_text/shuffle、submissions.bundle_id/bundle_token/bundle_position、
+-- questionnaires.total_formula/norm_in_report、questions.media 列
 -- 用法（新电脑建库）：mysql -u root -p < schema.sql
 --   只会新建不存在的表，不会删除或覆盖已有数据；建好表后运行 backend/createAdmin.js 创建初始账号
--- 已有数据库升级：不要用这个文件，按顺序执行 backend/sql/ 里的 round4~round7 四个文件
+-- 已有数据库升级：不要用这个文件，按顺序执行 backend/sql/ 里的 round4~round8 五个文件
 
 CREATE DATABASE IF NOT EXISTS `psych_assessment` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
 USE `psych_assessment`;
@@ -35,7 +37,7 @@ CREATE TABLE IF NOT EXISTS `answers` (
   CONSTRAINT `answers_ibfk_1` FOREIGN KEY (`submission_id`) REFERENCES `submissions` (`id`) ON DELETE RESTRICT ON UPDATE RESTRICT,
   CONSTRAINT `answers_ibfk_2` FOREIGN KEY (`question_id`) REFERENCES `questions` (`id`) ON DELETE RESTRICT ON UPDATE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci ROW_FORMAT=DYNAMIC;
--- bundle_questionnaires  问卷组合明细（表已建，代码尚未实现）
+-- bundle_questionnaires  问卷组合明细
 CREATE TABLE IF NOT EXISTS `bundle_questionnaires` (
   `id` int NOT NULL AUTO_INCREMENT,
   `bundle_id` int NOT NULL,
@@ -47,7 +49,7 @@ CREATE TABLE IF NOT EXISTS `bundle_questionnaires` (
   CONSTRAINT `bundle_questionnaires_ibfk_1` FOREIGN KEY (`bundle_id`) REFERENCES `bundles` (`id`) ON DELETE RESTRICT ON UPDATE RESTRICT,
   CONSTRAINT `bundle_questionnaires_ibfk_2` FOREIGN KEY (`questionnaire_id`) REFERENCES `questionnaires` (`id`) ON DELETE RESTRICT ON UPDATE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci ROW_FORMAT=DYNAMIC;
--- bundles  问卷组合（表已建，代码尚未实现）
+-- bundles  问卷组合（第8轮实现：一个链接依次作答多份问卷）
 CREATE TABLE IF NOT EXISTS `bundles` (
   `id` int NOT NULL AUTO_INCREMENT,
   `title` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '组合名称',
@@ -55,6 +57,8 @@ CREATE TABLE IF NOT EXISTS `bundles` (
   `created_by` int DEFAULT NULL COMMENT '创建者',
   `is_active` tinyint(1) DEFAULT '1',
   `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
+  `consent_text` text NULL COMMENT '知情同意说明，不填用默认文字',
+  `shuffle` tinyint(1) NULL DEFAULT 0 COMMENT '每人随机打乱问卷顺序（平衡顺序效应）',
   PRIMARY KEY (`id`) USING BTREE,
   KEY `created_by` (`created_by`) USING BTREE,
   CONSTRAINT `bundles_ibfk_1` FOREIGN KEY (`created_by`) REFERENCES `admins` (`id`) ON DELETE RESTRICT ON UPDATE RESTRICT
@@ -82,6 +86,20 @@ CREATE TABLE IF NOT EXISTS `dimensions` (
   KEY `questionnaire_id` (`questionnaire_id`) USING BTREE,
   CONSTRAINT `dimensions_ibfk_1` FOREIGN KEY (`questionnaire_id`) REFERENCES `questionnaires` (`id`) ON DELETE RESTRICT ON UPDATE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci ROW_FORMAT=DYNAMIC;
+-- norms  常模（第8轮新增）：可以按性别、年级等录入多套均值和标准差
+CREATE TABLE IF NOT EXISTS `norms` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `questionnaire_id` int NOT NULL COMMENT '所属问卷',
+  `name` varchar(100) NOT NULL COMMENT '常模名称，如 全国常模、男生',
+  `source` varchar(500) NULL DEFAULT NULL COMMENT '来源说明，如 出处文献',
+  `conditions` json NULL COMMENT '适用条件，空表示所有人，如[{"field_key":"gender","op":"eq","value":"男"}]',
+  `norm_values` json NOT NULL COMMENT '各指标的均值和标准差，如{"total":{"mean":1.5,"sd":0.4}}',
+  `order_num` int NULL DEFAULT 1,
+  `created_at` datetime NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `questionnaire_id` (`questionnaire_id`),
+  CONSTRAINT `norms_questionnaire_fk` FOREIGN KEY (`questionnaire_id`) REFERENCES `questionnaires` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 -- option_templates  选项模板（第4轮新增）
 CREATE TABLE IF NOT EXISTS `option_templates` (
   `id` int NOT NULL AUTO_INCREMENT,
@@ -117,6 +135,8 @@ CREATE TABLE IF NOT EXISTS `questionnaires` (
   `expires_at` datetime DEFAULT NULL COMMENT '问卷截止时间，NULL表示不限制',
   `is_active` tinyint(1) DEFAULT '1' COMMENT '问卷是否开放，FALSE时受测者无法填写',
   `show_report_chart` tinyint(1) DEFAULT '0' COMMENT '答完后是否向受测者展示维度得分图表',
+  `total_formula` varchar(20) NULL DEFAULT 'dimensions' COMMENT '总分算法：dimensions 各维度相加，items_sum / items_mean 维度里的题每题只算一次',
+  `norm_in_report` tinyint(1) NULL DEFAULT 0 COMMENT '受测者结果图表里是否显示常模平均',
   PRIMARY KEY (`id`) USING BTREE,
   KEY `created_by` (`created_by`) USING BTREE,
   CONSTRAINT `questionnaires_ibfk_1` FOREIGN KEY (`created_by`) REFERENCES `admins` (`id`) ON DELETE RESTRICT ON UPDATE RESTRICT
@@ -134,6 +154,7 @@ CREATE TABLE IF NOT EXISTS `questions` (
   `options` json DEFAULT NULL COMMENT '选项内容，JSON数组，如["从不","偶尔","经常","总是"]，量表题不填',
   `role` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT 'student' COMMENT '填写角色：student学生，parent家长，both通用',
   `section_id` int DEFAULT NULL COMMENT '所属板块（引导语）',
+  `media` json NULL COMMENT '题目上方显示的图片/视频/音频，如[{"type":"image","url":"/uploads/xx.jpg"}]',
   PRIMARY KEY (`id`) USING BTREE,
   KEY `questionnaire_id` (`questionnaire_id`) USING BTREE,
   KEY `section_id` (`section_id`),
@@ -199,8 +220,12 @@ CREATE TABLE IF NOT EXISTS `submissions` (
   `finished_at` datetime DEFAULT NULL COMMENT '提交完成时间',
   `tracking_code` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '受测者自填追踪码，用于纵向研究关联多次提交',
   `group_label` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '分组标记，由链接参数传入',
+  `bundle_id` int NULL DEFAULT NULL COMMENT '通过哪个问卷组合提交，NULL 表示单独的问卷链接',
+  `bundle_token` varchar(40) NULL DEFAULT NULL COMMENT '同一个人在一次组合作答中的几份问卷共用这个标记',
+  `bundle_position` int NULL DEFAULT NULL COMMENT '这份问卷是他在组合里作答的第几份',
   PRIMARY KEY (`id`) USING BTREE,
   KEY `questionnaire_id` (`questionnaire_id`) USING BTREE,
+  KEY `bundle_token` (`bundle_token`),
   CONSTRAINT `submissions_ibfk_1` FOREIGN KEY (`questionnaire_id`) REFERENCES `questionnaires` (`id`) ON DELETE RESTRICT ON UPDATE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci ROW_FORMAT=DYNAMIC;
 

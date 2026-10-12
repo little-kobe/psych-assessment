@@ -1,7 +1,13 @@
 <script setup>
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, onBeforeUnmount, nextTick } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
+import Sortable from "sortablejs";
+import MediaListEditor from "../components/MediaListEditor.vue";
+import OptionImage from "../components/OptionImage.vue";
+import CopyQuestionsDialog from "../components/CopyQuestionsDialog.vue";
+
+const SERVER = "http://localhost:3000";
 
 const route = useRoute();
 const router = useRouter();
@@ -14,12 +20,15 @@ const saving = ref(false);
 const editingId = ref(null); // null表示新增，有值表示编辑
 const inheritedFrom = ref(null); // 新增题目时沿用了第几题的设置
 const sections = ref([]); // 板块引导语列表
+const showCopyDialog = ref(false); // 从其他问卷复制题目
 
 const defaultForm = () => ({
   content: "",
   question_type: "scale",
-  options: [], // 单选/多选的选项：[{ label: "偶尔", score: 1 }]
+  options: [], // 单选/多选的选项：[{ label: "偶尔", score: 1, image: 图片地址或 null }]
   scaleLabels: {}, // 量表题每个分数对应的文字：{ 1: "完全没有", 5: "重度" }
+  scaleImages: {}, // 量表题每个分数对应的图片（如表情量表）：{ 1: "/uploads/xx.png" }
+  media: [], // 题目上方的图片 / 视频 / 音频
   min_score: 1,
   max_score: 5,
   role: "student",
@@ -45,9 +54,32 @@ function normalizeOptions(raw) {
   if (!Array.isArray(arr)) return [];
   return arr.map((o) =>
     typeof o === "string"
-      ? { label: o, score: null }
-      : { label: o.label ?? "", score: o.score ?? null },
+      ? { label: o, score: null, image: null }
+      : {
+          label: o.label ?? "",
+          score: o.score ?? null,
+          image: o.image || null,
+        },
   );
+}
+
+// 题目的媒体列表（数据库里是 JSON）
+function parseMedia(raw) {
+  let arr = raw;
+  if (!arr) return [];
+  if (typeof arr === "string") {
+    try {
+      arr = JSON.parse(arr);
+    } catch {
+      return [];
+    }
+  }
+  return Array.isArray(arr) ? arr : [];
+}
+
+// 选项保存时：有图片才带 image 字段
+function withImage(opt, image) {
+  return image ? { ...opt, image } : opt;
 }
 
 // 量表题的分数列表，如 1-5 分 → [1, 2, 3, 4, 5]
@@ -69,24 +101,30 @@ const choiceHasScores = computed(() =>
 function buildOptions() {
   const type = form.value.question_type;
   if (type === "scale") {
-    const opts = scaleScores.value.map((s) => ({
-      label: (form.value.scaleLabels[s] || "").trim(),
-      score: s,
-    }));
-    // 一个文字都没填，就不存选项（受测者看到的是数字按钮）
-    return opts.some((o) => o.label) ? opts : null;
+    const opts = scaleScores.value.map((s) =>
+      withImage(
+        { label: (form.value.scaleLabels[s] || "").trim(), score: s },
+        form.value.scaleImages[s],
+      ),
+    );
+    // 文字和图片都没填，就不存选项（受测者看到的是数字按钮）
+    return opts.some((o) => o.label || o.image) ? opts : null;
   }
   if (type === "single_choice") {
-    return form.value.options.map((o) => ({
-      label: o.label.trim(),
-      score: o.score === "" || o.score === undefined ? null : o.score,
-    }));
+    return form.value.options.map((o) =>
+      withImage(
+        {
+          label: o.label.trim(),
+          score: o.score === "" || o.score === undefined ? null : o.score,
+        },
+        o.image,
+      ),
+    );
   }
   if (type === "multiple_choice") {
-    return form.value.options.map((o) => ({
-      label: o.label.trim(),
-      score: null,
-    }));
+    return form.value.options.map((o) =>
+      withImage({ label: o.label.trim(), score: null }, o.image),
+    );
   }
   return null;
 }
@@ -167,7 +205,11 @@ async function fetchTemplates() {
 
 // 点击模板：把选项填进表单
 function applyTemplate(tpl) {
-  const opts = tpl.options.map((o) => ({ ...o }));
+  const opts = tpl.options.map((o) => ({
+    label: o.label,
+    score: o.score ?? null,
+    image: null,
+  }));
   if (form.value.question_type === "scale") {
     const scores = opts.map((o) => o.score).filter((s) => s !== null);
     if (scores.length === 0) {
@@ -177,6 +219,7 @@ function applyTemplate(tpl) {
     form.value.min_score = Math.min(...scores);
     form.value.max_score = Math.max(...scores);
     form.value.scaleLabels = {};
+    form.value.scaleImages = {};
     opts.forEach((o) => {
       if (o.score !== null) form.value.scaleLabels[o.score] = o.label;
     });
@@ -219,7 +262,10 @@ async function saveAsTemplate() {
       "Content-Type": "application/json",
       Authorization: `Bearer ${token}`,
     },
-    body: JSON.stringify({ name, options }),
+    body: JSON.stringify({
+      name,
+      options: options.map((o) => ({ label: o.label, score: o.score })),
+    }),
   });
   const data = await res.json();
   if (data.success) {
@@ -295,9 +341,13 @@ function formFromQuestion(q) {
   const type = q.question_type || "scale";
   const opts = normalizeOptions(q.options);
   const scaleLabels = {};
+  const scaleImages = {};
   if (type === "scale") {
     opts.forEach((o) => {
-      if (o.score !== null) scaleLabels[o.score] = o.label;
+      if (o.score !== null) {
+        scaleLabels[o.score] = o.label;
+        if (o.image) scaleImages[o.score] = o.image;
+      }
     });
   }
   return {
@@ -305,6 +355,8 @@ function formFromQuestion(q) {
     question_type: type,
     options: type === "scale" ? [] : opts,
     scaleLabels,
+    scaleImages,
+    media: parseMedia(q.media),
     min_score: q.min_score,
     max_score: q.max_score,
     role: q.role || "student",
@@ -322,6 +374,7 @@ function openAdd() {
       ...formFromQuestion(last),
       content: "",
       is_reverse_scored: false,
+      media: [], // 图片视频不沿用
     };
     inheritedFrom.value = last.order_num;
   } else {
@@ -358,8 +411,15 @@ async function saveQuestion() {
     return;
   }
   if (isChoice && form.value.options.some((o) => !o.label.trim())) {
-    ElMessage.warning("选项文字不能为空");
+    ElMessage.warning("选项文字不能为空（纯图片选项可以填 A、B、C）");
     return;
+  }
+  if (isChoice) {
+    const labels = form.value.options.map((o) => o.label.trim());
+    if (new Set(labels).size < labels.length) {
+      ElMessage.warning("选项文字不能重复，否则分不清受测者选的是哪一个");
+      return;
+    }
   }
   if (
     form.value.min_score >= form.value.max_score &&
@@ -379,6 +439,7 @@ async function saveQuestion() {
     role: form.value.role,
     is_reverse_scored: form.value.is_reverse_scored,
     section_id: form.value.section_id,
+    media: form.value.media,
   };
   // 带分值的单选题：分值范围取选项里的最低分和最高分（反向计分要用）
   if (form.value.question_type === "single_choice") {
@@ -476,20 +537,6 @@ async function deleteQuestion(q) {
   }
 }
 
-async function moveUp(index) {
-  if (index === 0) return;
-  const arr = [...questions.value];
-  [arr[index - 1], arr[index]] = [arr[index], arr[index - 1]];
-  await saveOrder(arr);
-}
-
-async function moveDown(index) {
-  if (index === questions.value.length - 1) return;
-  const arr = [...questions.value];
-  [arr[index], arr[index + 1]] = [arr[index + 1], arr[index]];
-  await saveOrder(arr);
-}
-
 // 把第 index 个题目移动到第 targetPos 位（targetPos 从 1 开始）
 async function moveTo(index, targetPos) {
   const total = questions.value.length;
@@ -501,8 +548,10 @@ async function moveTo(index, targetPos) {
   const arr = [...questions.value];
   const [moved] = arr.splice(index, 1); // 先取出
   arr.splice(pos - 1, 0, moved); // 再插到目标位置
-  await saveOrder(arr);
-  ElMessage.success(`已移到第 ${pos} 位`);
+  if (await saveOrder(arr)) {
+    ElMessage.success(`已移到第 ${pos} 位`);
+    flash(moved.id);
+  }
 }
 
 // 一键置顶
@@ -528,14 +577,91 @@ async function saveOrder(arr) {
     const data = await res.json();
     if (data.success) {
       questions.value = arr.map((q, i) => ({ ...q, order_num: i + 1 }));
+      return true;
     }
+    ElMessage.error(data.message || "排序保存失败");
   } catch (err) {
     ElMessage.error("排序保存失败");
   }
+  return false;
+}
+
+// ---------- 拖拽排序 ----------
+const listRef = ref(null);
+const flashId = ref(null); // 刚移动过的题目，短暂高亮
+let sortable = null;
+let flashTimer = null;
+let dragOrigin = null;
+
+function flash(id) {
+  flashId.value = id;
+  clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => (flashId.value = null), 1500);
+}
+
+function setupSortable() {
+  if (!listRef.value || sortable) return;
+  sortable = Sortable.create(listRef.value, {
+    animation: 180,
+    draggable: ".q-item",
+    filter: ".q-actions", // 在按钮、输入框上按下不会开始拖动
+    preventOnFilter: false,
+    ghostClass: "drag-ghost",
+    chosenClass: "drag-chosen",
+    dragClass: "drag-moving",
+    // 用鼠标事件模拟拖动（不用浏览器原生拖放），各浏览器效果一致，拖起的卡片跟着鼠标走
+    forceFallback: true,
+    fallbackClass: "drag-floating",
+    fallbackOnBody: true,
+    scroll: true,
+    scrollSensitivity: 80,
+    onStart: (evt) => {
+      // 记住拖动前的位置，松手后先放回原处
+      dragOrigin = { parent: evt.item.parentNode, next: evt.item.nextSibling };
+    },
+    onEnd: async (evt) => {
+      const { oldDraggableIndex: from, newDraggableIndex: to, item } = evt;
+      // 先把 Sortable 移动过的元素放回原处，再改数据，让 Vue 按新顺序重新渲染
+      if (dragOrigin) dragOrigin.parent.insertBefore(item, dragOrigin.next);
+      dragOrigin = null;
+      if (from === to || from === undefined || to === undefined) return;
+
+      const arr = [...questions.value];
+      const [moved] = arr.splice(from, 1);
+      arr.splice(to, 0, moved);
+      if (await saveOrder(arr)) {
+        ElMessage.success(`第 ${from + 1} 题已移到第 ${to + 1} 位`);
+        await nextTick();
+        flash(moved.id);
+      }
+    },
+  });
+}
+
+onBeforeUnmount(() => {
+  if (sortable) sortable.destroy();
+  clearTimeout(flashTimer);
+});
+
+// 列表上显示的媒体说明，如「2 张图片、1 段视频」
+function mediaSummary(q) {
+  const list = parseMedia(q.media);
+  const count = (t) => list.filter((m) => m.type === t).length;
+  const parts = [];
+  if (count("image")) parts.push(`${count("image")} 张图片`);
+  if (count("video")) parts.push(`${count("video")} 段视频`);
+  if (count("audio")) parts.push(`${count("audio")} 段音频`);
+  if (normalizeOptions(q.options).some((o) => o.image)) parts.push("图片选项");
+  return parts.join("、");
+}
+
+// 选项上传了图片、但还没填文字时，自动填 A、B、C…
+function fillLetter(opt, index) {
+  if (!opt.label.trim()) opt.label = String.fromCharCode(65 + index);
 }
 
 function addOption() {
-  form.value.options.push({ label: "", score: null });
+  form.value.options.push({ label: "", score: null, image: null });
 }
 
 function removeOption(index) {
@@ -666,6 +792,7 @@ function roleTagType(role) {
 onMounted(() => {
   fetchQuestions();
   fetchTemplates();
+  setupSortable();
 });
 </script>
 
@@ -678,6 +805,7 @@ onMounted(() => {
     <div class="header">
       <h2>题目编辑</h2>
       <div>
+        <el-button @click="showCopyDialog = true">从其他问卷复制</el-button>
         <el-button @click="openAddSection">添加板块引导语</el-button>
         <el-button type="primary" @click="openAdd">添加题目</el-button>
       </div>
@@ -688,7 +816,7 @@ onMounted(() => {
       :closable="false"
       show-icon
       style="margin-bottom: 16px"
-      description="可以在线添加、编辑、删除题目。调整顺序：在序号框输入目标位置后按回车，或点「置顶」，或用上下箭头微调。Excel批量导入功能仍然可用。"
+      description="调整顺序：按住题目直接拖到想要的位置，松手自动保存；离得远的也可以在序号框输入目标位置后按回车，或点「置顶」。点「从其他问卷复制」可以把别的问卷里的题目直接拿过来。"
     />
 
     <div v-if="questions.length === 0 && !loading">
@@ -715,14 +843,22 @@ onMounted(() => {
       </div>
     </div>
 
-    <div class="question-list">
-      <template v-for="(q, index) in questions" :key="q.id">
+    <div class="question-list" ref="listRef">
+      <div
+        v-for="(q, index) in questions"
+        :key="q.id"
+        class="q-item"
+        :class="{ 'just-moved': flashId === q.id }"
+      >
         <div v-if="isSectionStart(index)" class="section-divider">
           📌 {{ sectionTitle(q.section_id) }}
         </div>
         <el-card class="q-card">
           <div class="q-row">
-            <div class="q-order">{{ q.order_num }}</div>
+            <div class="q-drag" title="按住拖动，调整顺序">
+              <span class="drag-dots">⠿</span>
+              <div class="q-order">{{ q.order_num }}</div>
+            </div>
             <div class="q-main">
               <div class="q-content">{{ q.content }}</div>
               <div class="q-tags">
@@ -741,6 +877,9 @@ onMounted(() => {
                 <span v-if="formatOptions(q)" class="q-range">
                   {{ formatOptions(q) }}
                 </span>
+                <el-tag v-if="mediaSummary(q)" size="small" type="success"
+                  >🖼 {{ mediaSummary(q) }}</el-tag
+                >
               </div>
             </div>
             <div class="q-actions">
@@ -766,20 +905,6 @@ onMounted(() => {
                 @click="moveToTop(index)"
                 >置顶</el-button
               >
-              <el-button-group>
-                <el-button
-                  size="small"
-                  :disabled="index === 0"
-                  @click="moveUp(index)"
-                  >↑</el-button
-                >
-                <el-button
-                  size="small"
-                  :disabled="index === questions.length - 1"
-                  @click="moveDown(index)"
-                  >↓</el-button
-                >
-              </el-button-group>
               <el-button size="small" @click="openEdit(q)">编辑</el-button>
               <el-button size="small" type="danger" @click="deleteQuestion(q)"
                 >删除</el-button
@@ -787,7 +912,7 @@ onMounted(() => {
             </div>
           </div>
         </el-card>
-      </template>
+      </div>
     </div>
 
     <!-- 新增/编辑弹窗 -->
@@ -812,6 +937,10 @@ onMounted(() => {
             :rows="2"
             placeholder="请输入题目文字"
           />
+        </el-form-item>
+
+        <el-form-item label="图片视频">
+          <MediaListEditor v-model="form.media" />
         </el-form-item>
 
         <el-form-item label="题型">
@@ -890,10 +1019,12 @@ onMounted(() => {
                   v-model="form.scaleLabels[s]"
                   :placeholder="`${s} 分显示的文字（可不填）`"
                 />
+                <OptionImage v-model="form.scaleImages[s]" />
               </div>
               <div class="field-tip">
                 全部填写：受测者只看到文字，导出时自动换成分数。<br />
-                只填两端或不填：受测者看到数字按钮，两端显示文字。
+                只填两端或不填：受测者看到数字按钮，两端显示文字。<br />
+                每个分数都配了图片（如表情量表）：受测者看到图片选项。
               </div>
             </div>
           </el-form-item>
@@ -911,6 +1042,10 @@ onMounted(() => {
           <el-form-item label="选项内容">
             <div class="options-editor">
               <div v-for="(opt, i) in form.options" :key="i" class="option-row">
+                <OptionImage
+                  v-model="opt.image"
+                  @uploaded="fillLetter(opt, i)"
+                />
                 <el-input v-model="opt.label" :placeholder="`选项${i + 1}`" />
                 <el-input-number
                   v-if="form.question_type === 'single_choice'"
@@ -925,11 +1060,11 @@ onMounted(() => {
                 >
               </div>
               <el-button @click="addOption" size="small">+ 添加选项</el-button>
-              <div
-                v-if="form.question_type === 'single_choice'"
-                class="field-tip"
-              >
-                填了分值的单选题会参与计分，导出时显示分数；不填分值则只记录文字。
+              <div class="field-tip">
+                <template v-if="form.question_type === 'single_choice'"
+                  >填了分值的单选题会参与计分，导出时显示分数；不填分值则只记录文字。<br
+                /></template>
+                点「图片」可以给选项配图（如图形推理题），受测者看到图片选项；文字会显示在图片下方，也是导出时记录的内容。
               </div>
             </div>
           </el-form-item>
@@ -994,6 +1129,12 @@ onMounted(() => {
         >
       </template>
     </el-dialog>
+
+    <CopyQuestionsDialog
+      v-model="showCopyDialog"
+      :target-id="questionnaireId"
+      @copied="fetchQuestions"
+    />
 
     <!-- 板块引导语弹窗 -->
     <el-dialog
@@ -1071,6 +1212,52 @@ onMounted(() => {
 }
 .q-card {
   border: 1px solid #f0dcae;
+  cursor: grab;
+  transition:
+    box-shadow 0.2s,
+    background-color 0.6s;
+}
+.q-card:hover {
+  box-shadow: 0 2px 10px rgba(139, 90, 43, 0.12);
+}
+.q-actions {
+  cursor: default;
+}
+.q-drag {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.drag-dots {
+  color: #c9b48a;
+  font-size: 16px;
+  line-height: 1;
+  user-select: none;
+}
+.q-card:hover .drag-dots {
+  color: #f4844c;
+}
+/* 拖动时：原位置留一个虚线占位，拿起的卡片带阴影 */
+.drag-ghost :deep(.el-card) {
+  background: #fff3e6;
+  border: 1px dashed #f4844c;
+  opacity: 0.7;
+}
+.drag-chosen :deep(.el-card) {
+  box-shadow: 0 6px 18px rgba(244, 132, 76, 0.28);
+}
+/* 跟着鼠标走的那张卡片 */
+.drag-floating :deep(.el-card) {
+  border-color: #f4844c;
+  box-shadow: 0 10px 28px rgba(244, 132, 76, 0.35);
+}
+.drag-floating {
+  cursor: grabbing;
+}
+/* 刚移动过的题目短暂高亮 */
+.just-moved :deep(.el-card) {
+  background: #fff3e6;
 }
 .q-row {
   display: flex;
@@ -1079,6 +1266,7 @@ onMounted(() => {
 }
 .q-order {
   min-width: 28px;
+  cursor: grab;
   height: 28px;
   border-radius: 50%;
   background: linear-gradient(135deg, #fbb034, #f4844c);

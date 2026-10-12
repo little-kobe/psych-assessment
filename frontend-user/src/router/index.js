@@ -15,6 +15,12 @@ const routes = [
     component: QuestionnaireView,
   },
   {
+    // 问卷组合：一个链接依次作答几份问卷（和单份问卷用同一个页面）
+    path: "/b/:id",
+    name: "bundle",
+    component: QuestionnaireView,
+  },
+  {
     // 其他写错的网址：显示「链接有误」
     path: "/:pathMatch(.*)*",
     name: "notFound",

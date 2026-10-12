@@ -9,6 +9,8 @@ import QuestionEditor from "../views/QuestionEditor.vue";
 import ScoreRuleConfig from "../views/ScoreRuleConfig.vue";
 import SubjectInfoConfig from "../views/SubjectInfoConfig.vue";
 import StatsView from "../views/StatsView.vue";
+import BundleEdit from "../views/BundleEdit.vue";
+import NormConfig from "../views/NormConfig.vue";
 
 const routes = [
   { path: "/login", name: "login", component: LoginView },
@@ -33,6 +35,14 @@ const routes = [
     component: QuestionEditor,
   },
   { path: "/", name: "dashboard", component: DashboardView },
+  // 问卷组合：列表显示在首页布局里（左侧菜单「问卷组合」），编辑是单独页面
+  { path: "/bundles", name: "bundles", component: DashboardView },
+  { path: "/bundle/:id", name: "bundleEdit", component: BundleEdit },
+  {
+    path: "/questionnaire/:id/norms",
+    name: "normConfig",
+    component: NormConfig,
+  },
   { path: "/import", name: "import", component: ImportQuestions },
   {
     path: "/questionnaire/:id",

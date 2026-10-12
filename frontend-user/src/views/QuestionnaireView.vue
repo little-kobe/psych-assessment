@@ -1,14 +1,43 @@
 <script setup>
-import { ref, onMounted, computed } from "vue";
+import { ref, onMounted, computed, watch } from "vue";
 import { useRoute } from "vue-router";
 import { API_BASE } from "../api.js";
 
+// 两种入口：/q/问卷编号（单份问卷）、/b/组合编号（问卷组合：依次作答几份问卷）
 const route = useRoute();
-const questionnaireId = Number(route.params.id); // 网址里的问卷编号，写错时是 NaN
+const isBundle = route.name === "bundle";
+const entityId = Number(route.params.id); // 网址里的编号，写错时是 NaN
 const groupLabel = route.query.group || null; // 从链接参数读取分组标记
-const questionnaire = ref(null);
-const allQuestions = ref([]);
-const sections = ref([]); // 板块引导语
+
+const bundle = ref(null); // 问卷组合的信息（单份问卷时为 null）
+const units = ref([]); // 要作答的问卷：[{ questionnaire, questions, sections, infoFields }]
+const unitIndex = ref(0); // 正在作答第几份
+const unitDone = ref(false); // 组合里一份答完、还没开始下一份（显示过渡页）
+const bundleToken = makeToken(); // 同一个人这次作答的几份问卷共用这个标记
+const results = ref([]); // 每份问卷提交后的结果：[{ title, subjectReport, dimensionReports, reportChart }]
+
+const unit = computed(() => units.value[unitIndex.value] || null);
+const questionnaire = computed(() => unit.value?.questionnaire || null);
+const allQuestions = computed(() => unit.value?.questions || []);
+const sections = computed(() => unit.value?.sections || []); // 板块引导语
+
+// 知情同意页显示的标题和说明：组合用组合自己的
+const cover = computed(() => {
+  if (isBundle && bundle.value) {
+    return {
+      title: bundle.value.title,
+      description: bundle.value.description,
+      consent_text: bundle.value.consent_text,
+    };
+  }
+  const q = questionnaire.value || {};
+  return {
+    title: q.title,
+    description: q.description,
+    consent_text: q.consent_text,
+  };
+});
+
 const submitted = ref(false);
 const consented = ref(false);
 const loading = ref(true);
@@ -17,9 +46,16 @@ const loadError = ref(""); // 问卷不存在、链接有误、连不上服务�
 const overallStartTime = ref(null);
 const trackingCode = ref("");
 const showTrackingInput = ref(false);
-const subjectReport = ref(null); // 提交后对受测者可见的报告
-const dimensionReports = ref([]); // 各维度对受测者可见的评价
-const reportChart = ref(null); // 结果图表数据（问卷开启图表时才有）
+const submitting = ref(false); // 正在提交（防止连点两次交两份）
+const submitError = ref("");
+const zoomImage = ref(""); // 点开放大的图片
+
+// 生成一个随机标记（手机用局域网 IP 打开时没有 crypto.randomUUID，用 getRandomValues）
+function makeToken() {
+  const bytes = new Uint8Array(12);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
 
 // 条形长度：分数在这个维度「最低分~最高分」之间的位置（百分比）
 function barWidth(value, dim) {
@@ -29,14 +65,36 @@ function barWidth(value, dim) {
 }
 
 // 某个维度匹配到的评价（没有就返回 null）
-function dimRule(name) {
-  const found = dimensionReports.value.find((d) => d.name === name);
+function dimRule(r, name) {
+  const found = r.dimensionReports.find((d) => d.name === name);
   return found ? found.matched_rule : null;
 }
-const infoFields = ref([]); // 需要收集的字段配置
+
+// 这份问卷有没有要给受测者看的结果
+function hasResult(r) {
+  return !!(r.subjectReport || r.reportChart || r.dimensionReports.length > 0);
+}
+const anyResult = computed(() => results.value.some(hasResult));
+
+// 结果图表里有没有常模平均
+function chartHasNorm(chart) {
+  return (
+    !!chart.norm_name && chart.dimensions.some((d) => d.norm_mean !== null)
+  );
+}
+
+// 需要收集的基本信息：组合里几份问卷的字段合并，同一个字段只问一次
+const infoFields = computed(() => {
+  const list = [];
+  units.value.forEach((u) =>
+    u.infoFields.forEach((f) => {
+      if (!list.some((x) => x.field_key === f.field_key)) list.push(f);
+    }),
+  );
+  return list;
+});
 const infoAnswers = ref({}); // 受测者填写的基本信息
 const infoSubmitted = ref(false); // 基本信息是否已提交
-const submissionId = ref(null); // 提交后拿到的submission_id，用于关联基本信息
 const showDesc = ref(false); // 答题页是否展开问卷说明
 
 // 分角色分组
@@ -94,7 +152,21 @@ const currentAnswer = computed(() =>
   currentQuestion.value ? answersMap.value[currentQuestion.value.id] : null,
 );
 
-// 把选项统一成 [{ label, score }] 格式（兼容旧数据：纯文字数组）
+// 正在答题（知情同意、基本信息都过了，还没交卷）
+const inQuiz = computed(
+  () =>
+    consented.value &&
+    (infoFields.value.length === 0 || infoSubmitted.value) &&
+    !submitted.value &&
+    !unitDone.value &&
+    !!unit.value,
+);
+// 开始答题时才开始给第一题计时（以前从打开页面就开始计，第一题的用时会把读知情同意的时间算进去）
+watch(inQuiz, (now) => {
+  if (now) currentQuestionStartTime.value = Date.now();
+});
+
+// 把选项统一成 [{ label, score, image }] 格式（兼容旧数据：纯文字数组）
 function parseOptions(options) {
   let arr = options;
   if (!arr) return [];
@@ -108,15 +180,58 @@ function parseOptions(options) {
   if (!Array.isArray(arr)) return [];
   return arr.map((o) =>
     typeof o === "string"
-      ? { label: o, score: null }
-      : { label: o.label ?? "", score: o.score ?? null },
+      ? { label: o, score: null, image: null }
+      : {
+          label: o.label ?? "",
+          score: o.score ?? null,
+          image: o.image || null,
+        },
   );
+}
+
+// 题目的图片 / 视频 / 音频
+function parseMedia(raw) {
+  let arr = raw;
+  if (!arr) return [];
+  if (typeof arr === "string") {
+    try {
+      arr = JSON.parse(arr);
+    } catch {
+      return [];
+    }
+  }
+  return Array.isArray(arr) ? arr : [];
+}
+const currentMedia = computed(() =>
+  currentQuestion.value ? parseMedia(currentQuestion.value.media) : [],
+);
+function mediaUrl(url) {
+  return url ? API_BASE + url : "";
 }
 
 // 量表题：每个分数都配了文字时，受测者只看到文字按钮
 function scaleTextOptions(q) {
   const opts = parseOptions(q.options);
   return opts.length > 0 && opts.every((o) => o.label) ? opts : [];
+}
+
+// 量表题：每个分数都配了图片时，受测者看到图片选项（如表情量表）
+function scaleImageOptions(q) {
+  const opts = parseOptions(q.options);
+  return opts.length > 0 && opts.every((o) => o.image) ? opts : [];
+}
+
+// 图片量表不超过 7 个分数时排成一行
+function scaleGridStyle(q) {
+  const n = scaleImageOptions(q).length;
+  return n > 0 && n <= 7
+    ? { gridTemplateColumns: `repeat(${n}, minmax(0, 1fr))` }
+    : {};
+}
+
+// 单选 / 多选题：有选项配了图片时，用图片卡片显示
+function choiceHasImages(q) {
+  return parseOptions(q.options).some((o) => o.image);
 }
 
 // 量表题两端的提示文字（没配文字时显示「较低 / 较高」）
@@ -127,46 +242,93 @@ function scaleEndLabel(q, end) {
   return found ? found.label : end === "min" ? "较低" : "较高";
 }
 
+// 打乱顺序（组合设置了随机顺序时用）
+function shuffle(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+function parseFields(fields) {
+  return (fields || []).map((f) => ({
+    ...f,
+    options: f.options
+      ? typeof f.options === "string"
+        ? JSON.parse(f.options)
+        : f.options
+      : [],
+  }));
+}
+
+// 开始作答某一份问卷：清空上一份的作答状态
+function startUnit() {
+  answersMap.value = {};
+  questionDurations.value = {};
+  allQuestions.value.forEach((q) => {
+    questionDurations.value[q.id] = 0;
+  });
+  currentIndex.value = 0;
+  currentPhase.value = "student";
+  showDesc.value = false;
+  showSpeedWarning.value = false;
+  submitError.value = "";
+  overallStartTime.value = Date.now();
+  currentQuestionStartTime.value = Date.now();
+}
+
+async function loadSingle() {
+  const response = await fetch(`${API_BASE}/api/questionnaire/${entityId}`);
+  const data = await response.json();
+  if (!data.success) return data;
+  let infoFieldsList = [];
+  try {
+    const infoRes = await fetch(
+      `${API_BASE}/api/questionnaires/${entityId}/info-fields`,
+    );
+    const infoData = await infoRes.json();
+    if (infoData.success) infoFieldsList = parseFields(infoData.fields);
+  } catch (e) {}
+  units.value = [
+    {
+      questionnaire: data.questionnaire,
+      questions: data.questions,
+      sections: data.sections || [],
+      infoFields: infoFieldsList,
+    },
+  ];
+  return data;
+}
+
+async function loadBundle() {
+  const response = await fetch(`${API_BASE}/api/bundle/${entityId}`);
+  const data = await response.json();
+  if (!data.success) return data;
+  bundle.value = data.bundle;
+  let list = data.units.map((u) => ({
+    questionnaire: u.questionnaire,
+    questions: u.questions,
+    sections: u.sections || [],
+    infoFields: parseFields(u.info_fields),
+  }));
+  if (data.bundle.shuffle) list = shuffle(list);
+  units.value = list;
+  return data;
+}
+
 onMounted(async () => {
-  // 网址里的问卷编号不是正整数（比如 /q/abc），不用请求后端，直接提示链接有误
-  if (!Number.isInteger(questionnaireId) || questionnaireId <= 0) {
+  // 网址里的编号不是正整数（比如 /q/abc），不用请求后端，直接提示链接有误
+  if (!Number.isInteger(entityId) || entityId <= 0) {
     loadError.value = "问卷链接有误";
     loading.value = false;
     return;
   }
   try {
-    const response = await fetch(
-      `${API_BASE}/api/questionnaire/${questionnaireId}`,
-    );
-    const data = await response.json();
+    const data = isBundle ? await loadBundle() : await loadSingle();
     if (data.success) {
-      questionnaire.value = data.questionnaire;
-      allQuestions.value = data.questions;
-      sections.value = data.sections || [];
-      // 拉取基本信息字段配置
-      try {
-        const infoRes = await fetch(
-          `${API_BASE}/api/questionnaires/${questionnaireId}/info-fields`,
-        );
-        const infoData = await infoRes.json();
-        if (infoData.success) {
-          infoFields.value = infoData.fields.map((f) => ({
-            ...f,
-            options: f.options
-              ? typeof f.options === "string"
-                ? JSON.parse(f.options)
-                : f.options
-              : [],
-          }));
-        }
-      } catch (e) {}
-      overallStartTime.value = Date.now();
-      allQuestions.value.forEach((q) => {
-        questionDurations.value[q.id] = 0;
-      });
-      if (currentQuestions.value.length > 0) {
-        currentQuestionStartTime.value = Date.now();
-      }
+      startUnit();
     } else if (data.closed) {
       closedMessage.value = data.message;
     } else {
@@ -185,6 +347,7 @@ function recordCurrentQuestionTime() {
   const elapsed = Date.now() - currentQuestionStartTime.value;
   questionDurations.value[currentQuestion.value.id] =
     (questionDurations.value[currentQuestion.value.id] || 0) + elapsed;
+  currentQuestionStartTime.value = Date.now(); // 已经记过的时间不再重复计
 }
 
 function selectAnswer(value) {
@@ -215,7 +378,7 @@ function hasAnswer() {
 }
 
 function nextQuestion() {
-  if (!hasAnswer()) return;
+  if (!hasAnswer() || submitting.value) return;
 
   recordCurrentQuestionTime();
 
@@ -261,24 +424,13 @@ function prevQuestion() {
 }
 
 function confirmExit() {
-  if (confirm("确认退出？您目前的作答数据将不会被保存。")) {
+  const tip =
+    isBundle && unitIndex.value > 0
+      ? "确认退出？已经完成的问卷已保存，正在作答的这一份不会被保存。"
+      : "确认退出？您目前的作答数据将不会被保存。";
+  if (confirm(tip)) {
     window.location.href = "about:blank";
   }
-}
-
-async function submitSubjectInfo(subId) {
-  const info = infoFields.value.map((f) => ({
-    field_key: f.field_key,
-    field_label: f.field_label,
-    value: infoAnswers.value[f.field_key] || "",
-  }));
-  try {
-    await fetch(`${API_BASE}/api/submissions/${subId}/subject-info`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ info }),
-    });
-  } catch (e) {}
 }
 
 function hasInfoAnswered() {
@@ -291,7 +443,13 @@ function hasInfoAnswered() {
     );
 }
 
+const toDbTime = (ms) =>
+  new Date(ms).toISOString().slice(0, 19).replace("T", " ");
+
 async function submitQuestionnaire() {
+  if (submitting.value) return;
+  submitting.value = true;
+  submitError.value = "";
   const finishedAt = Date.now();
   const answers = allQuestions.value.map((q) => {
     const ans = answersMap.value[q.id];
@@ -325,47 +483,79 @@ async function submitQuestionnaire() {
     };
   });
 
-  const response = await fetch(`${API_BASE}/api/submission`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      questionnaire_id: questionnaireId,
-      tracking_code: trackingCode.value || null,
-      group_label: groupLabel,
-      started_at: new Date(overallStartTime.value)
-        .toISOString()
-        .slice(0, 19)
-        .replace("T", " "),
-      finished_at: new Date(finishedAt)
-        .toISOString()
-        .slice(0, 19)
-        .replace("T", " "),
-      answers,
-    }),
-  });
+  // 基本信息随提交一起保存（组合里每份问卷都记一份，方便各自导出和匹配常模）
+  const subjectInfo = infoFields.value.map((f) => ({
+    field_key: f.field_key,
+    field_label: f.field_label,
+    value: infoAnswers.value[f.field_key] ?? "",
+  }));
 
-  const data = await response.json();
-  if (data.success) {
-    submissionId.value = data.submission_id;
-    // 如果有基本信息字段需要填，先提交基本信息
-    if (infoFields.value.length > 0) {
-      await submitSubjectInfo(data.submission_id);
-    }
-    submitted.value = true;
-    // 拉取报告
+  try {
+    const response = await fetch(`${API_BASE}/api/submission`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        questionnaire_id: questionnaire.value.id,
+        tracking_code: trackingCode.value || null,
+        group_label: groupLabel,
+        started_at: toDbTime(overallStartTime.value),
+        finished_at: toDbTime(finishedAt),
+        answers,
+        subject_info: subjectInfo,
+        ...(isBundle
+          ? {
+              bundle_id: entityId,
+              bundle_token: bundleToken,
+              bundle_position: unitIndex.value + 1,
+            }
+          : {}),
+      }),
+    });
+    const data = await response.json();
+    if (!data.success) throw new Error(data.message);
+
+    // 拉取对受测者可见的结果
+    const result = {
+      title: questionnaire.value.title,
+      subjectReport: null,
+      dimensionReports: [],
+      reportChart: null,
+    };
     try {
       const reportRes = await fetch(
         `${API_BASE}/api/submissions/${data.submission_id}/report-public`,
       );
       const reportData = await reportRes.json();
       if (reportData.success) {
-        subjectReport.value = reportData.matched_rule; // 总分评价（可能为空）
-        dimensionReports.value = reportData.dimension_reports || [];
-        reportChart.value = reportData.chart || null;
+        result.subjectReport = reportData.matched_rule; // 总分评价（可能为空）
+        result.dimensionReports = reportData.dimension_reports || [];
+        result.reportChart = reportData.chart || null;
       }
     } catch (e) {}
+    results.value.push(result);
+
+    if (unitIndex.value < units.value.length - 1) {
+      unitDone.value = true; // 组合里还有下一份
+    } else {
+      submitted.value = true;
+    }
+  } catch (err) {
+    console.error("提交失败:", err);
+    submitError.value = "提交没有成功，请检查网络后再点一次「提交」。";
+  } finally {
+    submitting.value = false;
   }
 }
+
+// 组合：开始下一份问卷
+function nextUnit() {
+  unitIndex.value++;
+  unitDone.value = false;
+  startUnit();
+  window.scrollTo(0, 0);
+}
+
+const nextUnitInfo = computed(() => units.value[unitIndex.value + 1] || null);
 </script>
 
 <template>
@@ -457,18 +647,33 @@ async function submitQuestionnaire() {
               />
             </svg>
           </div>
-          <h2>{{ questionnaire.title }}</h2>
+          <h2>{{ cover.title }}</h2>
           <p class="consent-subtitle">参与前请阅读以下说明</p>
         </div>
         <!-- 问卷说明 -->
-        <div v-if="questionnaire.description" class="desc-box">
-          <p class="desc-title">问卷说明</p>
-          <p class="desc-text">{{ questionnaire.description }}</p>
+        <div v-if="cover.description" class="desc-box">
+          <p class="desc-title">{{ isBundle ? "测评说明" : "问卷说明" }}</p>
+          <p class="desc-text">{{ cover.description }}</p>
+        </div>
+        <!-- 组合：列出要答的几份问卷 -->
+        <div v-if="isBundle && units.length > 1" class="unit-list">
+          <p class="desc-title">
+            本次共 {{ units.length }} 份问卷，请按顺序依次完成
+          </p>
+          <div
+            v-for="(u, i) in units"
+            :key="u.questionnaire.id"
+            class="unit-row"
+          >
+            <span class="unit-no">{{ i + 1 }}</span>
+            <span class="unit-name">{{ u.questionnaire.title }}</span>
+            <span class="unit-count">{{ u.questions.length }} 题</span>
+          </div>
         </div>
         <div class="consent-body">
           <p class="consent-text">
             {{
-              questionnaire.consent_text ||
+              cover.consent_text ||
               "本问卷用于学术研究目的，所有回答数据将严格保密，仅用于统计分析，不会与您的个人身份挂钩。参与本问卷完全出于自愿，您可以随时退出。"
             }}
           </p>
@@ -592,6 +797,46 @@ async function submitQuestionnaire() {
         </button>
       </div>
 
+      <!-- 组合：一份答完，准备下一份 -->
+      <div v-else-if="unitDone" class="result-card unit-done">
+        <div class="result-icon">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none">
+            <circle
+              cx="12"
+              cy="12"
+              r="10"
+              stroke="#4CAF7D"
+              stroke-width="1.5"
+            />
+            <path
+              d="M7 12l3 3 7-7"
+              stroke="#4CAF7D"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              fill="none"
+            />
+          </svg>
+        </div>
+        <h2>第 {{ unitIndex + 1 }} 份已完成</h2>
+        <p class="result-sub">
+          共 {{ units.length }} 份，还剩
+          {{ units.length - unitIndex - 1 }} 份。可以稍微休息一下再继续。
+        </p>
+        <div v-if="nextUnitInfo" class="next-unit">
+          <p class="next-label">接下来：第 {{ unitIndex + 2 }} 份</p>
+          <p class="next-title">{{ nextUnitInfo.questionnaire.title }}</p>
+          <p class="next-count">共 {{ nextUnitInfo.questions.length }} 题</p>
+          <p
+            v-if="nextUnitInfo.questionnaire.description"
+            class="desc-text next-desc"
+          >
+            {{ nextUnitInfo.questionnaire.description }}
+          </p>
+        </div>
+        <button class="consent-btn" @click="nextUnit">继续作答</button>
+      </div>
+
       <div
         v-else-if="(infoFields.length === 0 || infoSubmitted) && !submitted"
         class="quiz-card"
@@ -604,6 +849,9 @@ async function submitQuestionnaire() {
         </div>
 
         <div class="quiz-header">
+          <p v-if="isBundle && units.length > 1" class="unit-badge">
+            第 {{ unitIndex + 1 }} / {{ units.length }} 份
+          </p>
           <h1>{{ questionnaire.title }}</h1>
           <!-- 答题过程中也能随时查看问卷说明 -->
           <button
@@ -641,6 +889,40 @@ async function submitQuestionnaire() {
           </div>
           <p class="question-text">{{ currentQuestion.content }}</p>
 
+          <!-- 题目的图片 / 视频 / 音频 -->
+          <div v-if="currentMedia.length > 0" class="q-media">
+            <template v-for="m in currentMedia" :key="m.url">
+              <img
+                v-if="m.type === 'image'"
+                :src="mediaUrl(m.url)"
+                class="q-media-img"
+                alt="题目图片"
+                @click="zoomImage = mediaUrl(m.url)"
+              />
+              <video
+                v-else-if="m.type === 'video'"
+                :src="mediaUrl(m.url)"
+                class="q-media-video"
+                controls
+                playsinline
+                preload="metadata"
+              ></video>
+              <audio
+                v-else-if="m.type === 'audio'"
+                :src="mediaUrl(m.url)"
+                class="q-media-audio"
+                controls
+                preload="metadata"
+              ></audio>
+            </template>
+            <p
+              v-if="currentMedia.some((m) => m.type === 'image')"
+              class="media-hint"
+            >
+              点击图片可以放大
+            </p>
+          </div>
+
           <!-- 量表题 -->
           <template
             v-if="
@@ -648,9 +930,28 @@ async function submitQuestionnaire() {
               currentQuestion.question_type === 'scale'
             "
           >
+            <!-- 每个分数都配了图片：显示图片选项（如表情量表） -->
+            <div
+              v-if="scaleImageOptions(currentQuestion).length > 0"
+              class="image-options scale-images"
+              :style="scaleGridStyle(currentQuestion)"
+            >
+              <button
+                v-for="opt in scaleImageOptions(currentQuestion)"
+                :key="opt.score"
+                class="image-option"
+                :class="{ active: currentAnswer === opt.score }"
+                @click="selectAnswer(opt.score)"
+              >
+                <img :src="mediaUrl(opt.image)" :alt="opt.label || opt.score" />
+                <span v-if="opt.label" class="image-option-label">{{
+                  opt.label
+                }}</span>
+              </button>
+            </div>
             <!-- 每个分数都配了文字：只显示文字，选中后记录对应分数 -->
             <div
-              v-if="scaleTextOptions(currentQuestion).length > 0"
+              v-else-if="scaleTextOptions(currentQuestion).length > 0"
               class="text-options"
             >
               <button
@@ -687,6 +988,30 @@ async function submitQuestionnaire() {
             </template>
           </template>
 
+          <!-- 单选题（图片选项） -->
+          <div
+            v-else-if="
+              currentQuestion.question_type === 'single_choice' &&
+              choiceHasImages(currentQuestion)
+            "
+            class="image-options"
+          >
+            <button
+              v-for="opt in parseOptions(currentQuestion.options)"
+              :key="opt.label"
+              class="image-option"
+              :class="{ active: currentAnswer === opt.label }"
+              @click="selectAnswer(opt.label)"
+            >
+              <img
+                v-if="opt.image"
+                :src="mediaUrl(opt.image)"
+                :alt="opt.label"
+              />
+              <span class="image-option-label">{{ opt.label }}</span>
+            </button>
+          </div>
+
           <!-- 单选题（文字选项） -->
           <div
             v-else-if="currentQuestion.question_type === 'single_choice'"
@@ -701,6 +1026,32 @@ async function submitQuestionnaire() {
             >
               {{ opt.label }}
             </button>
+          </div>
+
+          <!-- 多选题（图片选项） -->
+          <div
+            v-else-if="
+              currentQuestion.question_type === 'multiple_choice' &&
+              choiceHasImages(currentQuestion)
+            "
+          >
+            <p class="multi-hint">可多选</p>
+            <div class="image-options">
+              <button
+                v-for="opt in parseOptions(currentQuestion.options)"
+                :key="opt.label"
+                class="image-option"
+                :class="{ active: isMultiSelected(opt.label) }"
+                @click="toggleMultiAnswer(opt.label)"
+              >
+                <img
+                  v-if="opt.image"
+                  :src="mediaUrl(opt.image)"
+                  :alt="opt.label"
+                />
+                <span class="image-option-label">{{ opt.label }}</span>
+              </button>
+            </div>
           </div>
 
           <!-- 多选题 -->
@@ -773,16 +1124,21 @@ async function submitQuestionnaire() {
           <button
             class="nav-btn primary"
             @click="nextQuestion"
-            :disabled="!hasAnswer()"
+            :disabled="!hasAnswer() || submitting"
           >
             {{
-              isLastQuestion &&
-              !(currentPhase === "student" && hasParentSection)
-                ? "提交问卷"
-                : "下一题"
+              submitting
+                ? "正在提交…"
+                : isLastQuestion &&
+                    !(currentPhase === "student" && hasParentSection)
+                  ? isBundle && unitIndex < units.length - 1
+                    ? "提交这一份"
+                    : "提交问卷"
+                  : "下一题"
             }}
           </button>
         </div>
+        <p v-if="submitError" class="submit-error">{{ submitError }}</p>
 
         <div class="exit-row">
           <button class="exit-btn" @click="confirmExit">退出作答</button>
@@ -811,121 +1167,163 @@ async function submitQuestionnaire() {
         </div>
         <h2>感谢您完成本次测评</h2>
         <p class="result-sub">您的回答已安全提交，所有信息将匿名保存。</p>
-        <!-- 对受测者可见的评价结果 -->
-        <div
-          v-if="subjectReport || (!reportChart && dimensionReports.length > 0)"
-          class="subject-report"
-        >
-          <div class="report-divider"></div>
-          <p class="report-title">测评结果</p>
-          <template v-if="subjectReport">
+
+        <template v-for="(r, ri) in results" :key="ri">
+          <template v-if="hasResult(r)">
+            <!-- 组合里有几份问卷的结果时，标上是哪一份 -->
+            <p v-if="results.length > 1" class="result-unit-title">
+              《{{ r.title }}》
+            </p>
+
+            <!-- 对受测者可见的评价结果 -->
             <div
-              class="report-label-badge"
-              :style="{
-                background: (subjectReport.color || '#4CAF7D') + '22',
-                color: subjectReport.color || '#4CAF7D',
-                border:
-                  '1.5px solid ' + (subjectReport.color || '#4CAF7D') + '88',
-              }"
+              v-if="
+                r.subjectReport ||
+                (!r.reportChart && r.dimensionReports.length > 0)
+              "
+              class="subject-report"
             >
-              {{ subjectReport.label }}
+              <div class="report-divider"></div>
+              <p class="report-title">测评结果</p>
+              <template v-if="r.subjectReport">
+                <div
+                  class="report-label-badge"
+                  :style="{
+                    background: (r.subjectReport.color || '#4CAF7D') + '22',
+                    color: r.subjectReport.color || '#4CAF7D',
+                    border:
+                      '1.5px solid ' +
+                      (r.subjectReport.color || '#4CAF7D') +
+                      '88',
+                  }"
+                >
+                  {{ r.subjectReport.label }}
+                </div>
+                <div v-if="r.subjectReport.description" class="report-desc-box">
+                  {{ r.subjectReport.description }}
+                </div>
+              </template>
+
+              <!-- 各维度评价（有图表时显示在图表里，这里就不重复了） -->
+              <div
+                v-for="d in r.reportChart ? [] : r.dimensionReports"
+                :key="d.name"
+                class="dim-report"
+              >
+                <div class="dim-report-head">
+                  <span class="dim-report-name">{{ d.name }}</span>
+                  <span
+                    class="dim-report-badge"
+                    :style="{
+                      background: (d.matched_rule.color || '#4CAF7D') + '22',
+                      color: d.matched_rule.color || '#4CAF7D',
+                      borderColor: (d.matched_rule.color || '#4CAF7D') + '88',
+                    }"
+                    >{{ d.matched_rule.label }}</span
+                  >
+                </div>
+                <p v-if="d.matched_rule.description" class="dim-report-desc">
+                  {{ d.matched_rule.description }}
+                </p>
+              </div>
             </div>
-            <div v-if="subjectReport.description" class="report-desc-box">
-              {{ subjectReport.description }}
+
+            <!-- 结果图表：每个维度一条，自己的分 vs 平均分（vs 常模平均） -->
+            <div v-if="r.reportChart" class="chart-block">
+              <div class="report-divider"></div>
+              <p class="report-title">各维度得分</p>
+              <div class="chart-legend">
+                <span><i class="legend-dot mine"></i>你的得分</span>
+                <span
+                  ><i class="legend-dot avg"></i>平均分（{{
+                    r.reportChart.sample_size
+                  }}
+                  人）</span
+                >
+                <span v-if="chartHasNorm(r.reportChart)"
+                  ><i class="legend-dot norm"></i>常模平均</span
+                >
+              </div>
+
+              <div
+                v-for="dim in r.reportChart.dimensions"
+                :key="dim.id"
+                class="chart-dim"
+              >
+                <div class="chart-dim-head">
+                  <span class="chart-dim-name">{{ dim.name }}</span>
+                  <span
+                    v-if="dimRule(r, dim.name)"
+                    class="dim-report-badge"
+                    :style="{
+                      background:
+                        (dimRule(r, dim.name).color || '#4CAF7D') + '22',
+                      color: dimRule(r, dim.name).color || '#4CAF7D',
+                      borderColor:
+                        (dimRule(r, dim.name).color || '#4CAF7D') + '88',
+                    }"
+                    >{{ dimRule(r, dim.name).label }}</span
+                  >
+                </div>
+
+                <div class="bar-row">
+                  <span class="bar-label">你的得分</span>
+                  <div class="bar-track">
+                    <div
+                      class="bar-fill mine"
+                      :style="{ width: barWidth(dim.score, dim) + '%' }"
+                    ></div>
+                  </div>
+                  <span class="bar-value">{{ dim.score ?? "-" }}</span>
+                </div>
+                <div class="bar-row">
+                  <span class="bar-label">平均分</span>
+                  <div class="bar-track">
+                    <div
+                      class="bar-fill avg"
+                      :style="{ width: barWidth(dim.average, dim) + '%' }"
+                    ></div>
+                  </div>
+                  <span class="bar-value">{{ dim.average ?? "-" }}</span>
+                </div>
+                <div
+                  v-if="chartHasNorm(r.reportChart) && dim.norm_mean !== null"
+                  class="bar-row"
+                >
+                  <span class="bar-label">常模平均</span>
+                  <div class="bar-track">
+                    <div
+                      class="bar-fill norm"
+                      :style="{ width: barWidth(dim.norm_mean, dim) + '%' }"
+                    ></div>
+                  </div>
+                  <span class="bar-value">{{ dim.norm_mean }}</span>
+                </div>
+                <div class="bar-scale">
+                  <span>{{ dim.min }}</span
+                  ><span>{{ dim.max }}</span>
+                </div>
+
+                <p
+                  v-if="dimRule(r, dim.name)?.description"
+                  class="dim-report-desc"
+                >
+                  {{ dimRule(r, dim.name).description }}
+                </p>
+                <p v-else-if="dim.description" class="dim-report-desc">
+                  {{ dim.description }}
+                </p>
+              </div>
             </div>
           </template>
-
-          <!-- 各维度评价（有图表时显示在图表里，这里就不重复了） -->
-          <div
-            v-for="d in reportChart ? [] : dimensionReports"
-            :key="d.name"
-            class="dim-report"
-          >
-            <div class="dim-report-head">
-              <span class="dim-report-name">{{ d.name }}</span>
-              <span
-                class="dim-report-badge"
-                :style="{
-                  background: (d.matched_rule.color || '#4CAF7D') + '22',
-                  color: d.matched_rule.color || '#4CAF7D',
-                  borderColor: (d.matched_rule.color || '#4CAF7D') + '88',
-                }"
-                >{{ d.matched_rule.label }}</span
-              >
-            </div>
-            <p v-if="d.matched_rule.description" class="dim-report-desc">
-              {{ d.matched_rule.description }}
-            </p>
-          </div>
-        </div>
-
-        <!-- 结果图表：每个维度一条，自己的分 vs 平均分 -->
-        <div v-if="reportChart" class="chart-block">
-          <div class="report-divider"></div>
-          <p class="report-title">各维度得分</p>
-          <div class="chart-legend">
-            <span><i class="legend-dot mine"></i>你的得分</span>
-            <span
-              ><i class="legend-dot avg"></i>平均分（{{
-                reportChart.sample_size
-              }}
-              人）</span
-            >
-          </div>
-
-          <div
-            v-for="dim in reportChart.dimensions"
-            :key="dim.id"
-            class="chart-dim"
-          >
-            <div class="chart-dim-head">
-              <span class="chart-dim-name">{{ dim.name }}</span>
-              <span
-                v-if="dimRule(dim.name)"
-                class="dim-report-badge"
-                :style="{
-                  background: (dimRule(dim.name).color || '#4CAF7D') + '22',
-                  color: dimRule(dim.name).color || '#4CAF7D',
-                  borderColor: (dimRule(dim.name).color || '#4CAF7D') + '88',
-                }"
-                >{{ dimRule(dim.name).label }}</span
-              >
-            </div>
-
-            <div class="bar-row">
-              <span class="bar-label">你的得分</span>
-              <div class="bar-track">
-                <div
-                  class="bar-fill mine"
-                  :style="{ width: barWidth(dim.score, dim) + '%' }"
-                ></div>
-              </div>
-              <span class="bar-value">{{ dim.score ?? "-" }}</span>
-            </div>
-            <div class="bar-row">
-              <span class="bar-label">平均分</span>
-              <div class="bar-track">
-                <div
-                  class="bar-fill avg"
-                  :style="{ width: barWidth(dim.average, dim) + '%' }"
-                ></div>
-              </div>
-              <span class="bar-value">{{ dim.average ?? "-" }}</span>
-            </div>
-            <div class="bar-scale">
-              <span>{{ dim.min }}</span
-              ><span>{{ dim.max }}</span>
-            </div>
-
-            <p v-if="dimRule(dim.name)?.description" class="dim-report-desc">
-              {{ dimRule(dim.name).description }}
-            </p>
-            <p v-else-if="dim.description" class="dim-report-desc">
-              {{ dim.description }}
-            </p>
-          </div>
-        </div>
+        </template>
       </div>
+    </div>
+
+    <!-- 点开放大的图片 -->
+    <div v-if="zoomImage" class="zoom-mask" @click="zoomImage = ''">
+      <img :src="zoomImage" alt="放大的图片" />
+      <span class="zoom-close">点任意处关闭</span>
     </div>
   </div>
 </template>
@@ -958,6 +1356,198 @@ async function submitQuestionnaire() {
 .legend-dot.avg,
 .bar-fill.avg {
   background: #2a78d6;
+}
+.legend-dot.norm,
+.bar-fill.norm {
+  background: #d9892b;
+}
+/* 组合：问卷列表、过渡页、结果分份 */
+.unit-list {
+  background: #f6fbf7;
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+  text-align: left;
+}
+.unit-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 14px;
+  color: #2e4a38;
+}
+.unit-no {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #4caf7d;
+  color: white;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.unit-name {
+  flex: 1;
+}
+.unit-count {
+  font-size: 12px;
+  color: #8aaa94;
+}
+.unit-badge {
+  display: inline-block;
+  margin: 0 0 6px;
+  padding: 2px 10px;
+  border-radius: 10px;
+  background: #e8f5e9;
+  color: #2e7d32;
+  font-size: 12px;
+  font-weight: 600;
+}
+.next-unit {
+  background: #f6fbf7;
+  border-radius: 12px;
+  padding: 14px 16px;
+  margin: 16px 0 18px;
+  text-align: left;
+}
+.next-label {
+  margin: 0;
+  font-size: 12px;
+  color: #8aaa94;
+}
+.next-title {
+  margin: 4px 0 2px;
+  font-size: 16px;
+  font-weight: 600;
+  color: #2e4a38;
+}
+.next-count {
+  margin: 0;
+  font-size: 13px;
+  color: #5a7a64;
+}
+.next-desc {
+  margin-top: 8px;
+}
+.result-unit-title {
+  margin: 22px 0 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: #2e4a38;
+}
+.submit-error {
+  margin: 10px 0 0;
+  font-size: 13px;
+  color: #c0392b;
+  text-align: center;
+}
+/* 题目的图片 / 视频 / 音频 */
+.q-media {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin: -8px 0 18px;
+}
+.q-media-img {
+  max-width: 100%;
+  max-height: 46vh;
+  border-radius: 10px;
+  cursor: zoom-in;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.06);
+}
+.q-media-video {
+  width: 100%;
+  max-height: 50vh;
+  border-radius: 10px;
+  background: #000;
+}
+.q-media-audio {
+  width: 100%;
+}
+.media-hint {
+  margin: 0;
+  font-size: 11px;
+  color: #9cb8a6;
+}
+/* 图片选项 */
+.image-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 10px;
+}
+/* 量表的图片（如表情量表）排成一行 */
+.image-options.scale-images {
+  grid-template-columns: repeat(auto-fit, minmax(54px, 1fr));
+  gap: 6px;
+}
+.scale-images .image-option {
+  padding: 5px 3px;
+}
+.scale-images .image-option-label {
+  font-size: 11px;
+}
+.image-option {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 8px;
+  border: 2px solid #dcefe0;
+  background: #fff;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+  font-family: inherit;
+}
+.image-option img {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  object-fit: contain;
+  border-radius: 6px;
+  background: #fafafa;
+}
+.image-option-label {
+  font-size: 13px;
+  color: #3d5a48;
+  line-height: 1.3;
+}
+.image-option:hover {
+  border-color: #9ed9b2;
+}
+.image-option.active {
+  border-color: #4caf7d;
+  background: #eaf7ef;
+  box-shadow: 0 0 0 3px rgba(76, 175, 125, 0.25);
+}
+.image-option.active .image-option-label {
+  color: #2e7d32;
+  font-weight: 600;
+}
+/* 放大图片 */
+.zoom-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+.zoom-mask img {
+  max-width: 100%;
+  max-height: 88vh;
+  border-radius: 6px;
+}
+.zoom-close {
+  margin-top: 10px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.7);
 }
 .chart-dim {
   background: #f9fcfa;

@@ -1,7 +1,7 @@
 <script setup>
 import { ref, onMounted, computed } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { ElMessage } from "element-plus";
+import { ElMessage, ElMessageBox } from "element-plus";
 
 const route = useRoute();
 const router = useRouter();
@@ -12,6 +12,89 @@ const dimensions = ref([]);
 const loading = ref(true);
 const saving = ref(false);
 const searchKeyword = ref("");
+const totalFormula = ref("dimensions"); // 总分算法
+
+const formulaOptions = [
+  {
+    value: "dimensions",
+    label: "各维度得分相加",
+    tip: "原来的算法。一道题属于几个维度，就会在总分里被算几次。",
+  },
+  {
+    value: "items_sum",
+    label: "维度里的题相加（每题只算一次）",
+    tip: "有题目同时属于多个维度时推荐，总分里每道题只算一次。",
+  },
+  {
+    value: "items_mean",
+    label: "维度里的题取平均（每题只算一次）",
+    tip: "总分是所有题的平均分，如 SCL-90 的「总均分」。",
+  },
+];
+
+// 每道题被放进了哪些维度：{ 题目id: [维度序号...] }
+const dimsOfQuestion = computed(() => {
+  const map = {};
+  dimensions.value.forEach((dim, di) => {
+    dim.question_ids.forEach((qid) => {
+      if (!map[qid]) map[qid] = [];
+      if (!map[qid].includes(di)) map[qid].push(di);
+    });
+  });
+  return map;
+});
+
+function dimLabel(di) {
+  return dimensions.value[di]?.name || `维度 ${di + 1}`;
+}
+
+// 某道题除了当前维度，还在哪些维度里
+function otherDims(qid, currentIndex) {
+  return (dimsOfQuestion.value[qid] || [])
+    .filter((di) => di !== currentIndex)
+    .map(dimLabel);
+}
+
+// 同时属于多个维度的题
+const multiDimQuestions = computed(() =>
+  questions.value
+    .filter((q) => (dimsOfQuestion.value[q.id] || []).length > 1)
+    .map((q) => ({
+      ...q,
+      dimNames: dimsOfQuestion.value[q.id].map(dimLabel),
+    })),
+);
+
+// 是否计分题（量表题，或选项配了分值的单选题）
+function isScored(q) {
+  const type = q.question_type || "scale";
+  if (type === "scale") return true;
+  if (type !== "single_choice") return false;
+  let opts = q.options;
+  if (typeof opts === "string") {
+    try {
+      opts = JSON.parse(opts);
+    } catch {
+      opts = [];
+    }
+  }
+  return (
+    Array.isArray(opts) &&
+    opts.some(
+      (o) =>
+        o && typeof o === "object" && o.score !== null && o.score !== undefined,
+    )
+  );
+}
+
+// 没有放进任何维度的计分题
+const unassignedQuestions = computed(() =>
+  dimensions.value.length === 0
+    ? []
+    : questions.value.filter(
+        (q) => isScored(q) && !(dimsOfQuestion.value[q.id] || []).length,
+      ),
+);
 
 const filteredQuestions = computed(() => {
   if (!searchKeyword.value) return questions.value;
@@ -32,7 +115,10 @@ async function fetchData() {
       },
     );
     const qData = await qRes.json();
-    if (qData.success) questions.value = qData.questions;
+    if (qData.success) {
+      questions.value = qData.questions;
+      totalFormula.value = qData.questionnaire.total_formula || "dimensions";
+    }
 
     const dRes = await fetch(
       `http://localhost:3000/api/questionnaires/${questionnaireId}/dimensions`,
@@ -116,6 +202,35 @@ async function saveDimensions() {
     }
   }
 
+  // 有题目同时属于多个维度：保存前提醒一次
+  if (multiDimQuestions.value.length > 0) {
+    const list = multiDimQuestions.value
+      .slice(0, 8)
+      .map((q) => `第${q.order_num}题（${q.dimNames.join("、")}）`)
+      .join("；");
+    const more =
+      multiDimQuestions.value.length > 8
+        ? ` 等 ${multiDimQuestions.value.length} 道题`
+        : "";
+    const totalTip =
+      totalFormula.value === "dimensions"
+        ? "总分现在是「各维度得分相加」，这些题会被重复计入总分。如果总分里每道题只该算一次，请把下面的「总分怎么算」改成「每题只算一次」。"
+        : "总分按「每题只算一次」计算，不会重复计入总分。";
+    try {
+      await ElMessageBox.confirm(
+        `${list}${more} 同时属于多个维度，会分别计入每个维度的得分。${totalTip}`,
+        "有题目同时属于多个维度",
+        {
+          type: "warning",
+          confirmButtonText: "确定，就这样保存",
+          cancelButtonText: "再看看",
+        },
+      );
+    } catch {
+      return;
+    }
+  }
+
   saving.value = true;
   const token = localStorage.getItem("admin_token");
   try {
@@ -127,7 +242,10 @@ async function saveDimensions() {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ dimensions: dimensions.value }),
+        body: JSON.stringify({
+          dimensions: dimensions.value,
+          total_formula: totalFormula.value,
+        }),
       },
     );
     const data = await response.json();
@@ -186,6 +304,52 @@ onMounted(fetchData);
         显示 {{ filteredQuestions.length }} / {{ questions.length }} 道题
       </span>
     </div>
+
+    <!-- 跨维度的题、没归入维度的题：提醒 -->
+    <el-alert
+      v-if="multiDimQuestions.length > 0"
+      type="warning"
+      :closable="false"
+      show-icon
+      class="notice"
+      :title="`有 ${multiDimQuestions.length} 道题同时属于多个维度`"
+    >
+      <div class="notice-body">
+        <span v-for="q in multiDimQuestions" :key="q.id" class="notice-chip"
+          >第{{ q.order_num }}题：{{ q.dimNames.join("、") }}</span
+        >
+        <p>
+          这些题会分别计入每个维度的得分。<template
+            v-if="totalFormula === 'dimensions'"
+            >总分现在是「各维度得分相加」，它们会被<b>重复计入总分</b>；如果不想重复，把下面「总分怎么算」改成「每题只算一次」。</template
+          ><template v-else>总分按「每题只算一次」计算，不会重复。</template>
+        </p>
+      </div>
+    </el-alert>
+    <el-alert
+      v-if="unassignedQuestions.length > 0"
+      type="info"
+      :closable="false"
+      show-icon
+      class="notice"
+      :title="`有 ${unassignedQuestions.length} 道计分题没有放进任何维度：第 ${unassignedQuestions.map((q) => q.order_num).join('、')} 题`"
+      description="它们不计入任何维度，也不计入总分。如果是有意的（比如测谎题、填充题）可以不管。"
+    />
+
+    <el-card v-if="dimensions.length > 0" class="formula-card" shadow="never">
+      <div class="formula-title">总分怎么算</div>
+      <el-radio-group v-model="totalFormula" class="formula-group">
+        <el-radio
+          v-for="f in formulaOptions"
+          :key="f.value"
+          :value="f.value"
+          class="formula-radio"
+        >
+          <span class="formula-label">{{ f.label }}</span>
+          <span class="formula-tip">{{ f.tip }}</span>
+        </el-radio>
+      </el-radio-group>
+    </el-card>
 
     <div v-if="dimensions.length === 0" style="margin: 40px 0">
       <el-empty description="还没有配置维度，点击右上角「添加维度」开始配置">
@@ -257,6 +421,24 @@ onMounted(fetchData);
                   <span class="q-num">第{{ q.order_num }}题</span>
                   <span class="q-content">{{ q.content }}</span>
                   <el-tag
+                    v-if="
+                      dim.question_ids.includes(q.id) &&
+                      otherDims(q.id, index).length > 0
+                    "
+                    type="danger"
+                    effect="plain"
+                    size="small"
+                    style="margin-left: 6px; flex-shrink: 0"
+                    >也在：{{ otherDims(q.id, index).join("、") }}</el-tag
+                  >
+                  <el-tag
+                    v-else-if="otherDims(q.id, index).length > 0"
+                    type="info"
+                    size="small"
+                    style="margin-left: 6px; flex-shrink: 0"
+                    >已在：{{ otherDims(q.id, index).join("、") }}</el-tag
+                  >
+                  <el-tag
                     v-if="q.is_reverse_scored"
                     type="warning"
                     size="small"
@@ -324,6 +506,8 @@ onMounted(fetchData);
   font-size: 14px;
 }
 .batch-toolbar {
+  width: 100%;
+  box-sizing: border-box;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -341,7 +525,11 @@ onMounted(fetchData);
   display: flex;
   gap: 6px;
 }
+.dimension-card :deep(.el-checkbox-group) {
+  width: 100%;
+}
 .question-list {
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -371,6 +559,51 @@ onMounted(fetchData);
   font-size: 13px;
   color: #3d2b12;
   line-height: 1.5;
+}
+.notice {
+  margin-bottom: 14px;
+}
+.notice-body p {
+  margin: 6px 0 0;
+  line-height: 1.6;
+}
+.notice-chip {
+  display: inline-block;
+  margin: 2px 8px 2px 0;
+  padding: 1px 8px;
+  background: #fdf6ec;
+  border: 1px solid #f5dab1;
+  border-radius: 4px;
+  font-size: 12px;
+}
+.formula-card {
+  border: 1px solid #f0dcae;
+  margin-bottom: 16px;
+}
+.formula-title {
+  font-weight: 600;
+  color: #8b5a2b;
+  font-size: 14px;
+  margin-bottom: 8px;
+}
+.formula-group {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+.formula-radio {
+  height: auto;
+  white-space: normal;
+}
+.formula-label {
+  font-weight: 500;
+  color: #3d2b12;
+}
+.formula-tip {
+  margin-left: 8px;
+  font-size: 12px;
+  color: #999;
 }
 .no-result {
   text-align: center;

@@ -1,3 +1,5 @@
 node_modules/
 .DS_Store
 *.log
+# 题目里上传的图片、视频、音频（属于数据，不放进代码仓库，换电脑时单独拷贝）
+backend/uploads/

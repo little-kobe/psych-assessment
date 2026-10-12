@@ -2,6 +2,7 @@
 import { ref, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
+import CopyQuestionsDialog from "../components/CopyQuestionsDialog.vue";
 
 const route = useRoute();
 const router = useRouter();
@@ -13,6 +14,26 @@ const uploadRef = ref(null);
 const importing = ref(false);
 const downloading = ref(false);
 const resultInfo = ref(null);
+const showCopyDialog = ref(false);
+const copyResult = ref(null); // 从其他问卷复制的结果
+
+function openCopy() {
+  if (!questionnaireId.value) {
+    ElMessage.warning("请先在上面选择要导入到哪份问卷");
+    return;
+  }
+  copyResult.value = null;
+  showCopyDialog.value = true;
+}
+
+function onCopied(data) {
+  copyResult.value = data;
+  fetchQuestionnaires(); // 刷新题目数
+}
+
+function goEditQuestions() {
+  router.push(`/questionnaire/${questionnaireId.value}/edit-questions`);
+}
 
 // 每一列怎么填（和下载的模板里「填写说明」一致）
 const columnHelp = [
@@ -176,36 +197,68 @@ onMounted(fetchQuestionnaires);
     <el-button @click="goBack" text>← 返回</el-button>
 
     <div class="header">
-      <h2>批量导入题目</h2>
+      <h2>导入题目</h2>
       <el-button @click="downloadTemplate" :loading="downloading"
         >下载导入模板</el-button
       >
     </div>
 
-    <el-alert
-      type="info"
-      :closable="false"
-      show-icon
-      description="建议先下载模板照着填。题号和已有题目相同时会覆盖更新；表里没有的列，原来的设置保持不变，所以旧版表格照样能用。导出数据里的「题目与选项对照」表也能直接导入，可用来把一份问卷的题目复制到另一份。"
-    />
+    <!-- 第一步：导入到哪份问卷 -->
+    <el-card class="card target-card" shadow="never">
+      <div class="step-title">
+        <span class="step-no">1</span>题目要放进哪份问卷（目标问卷）
+      </div>
+      <el-select
+        v-model="questionnaireId"
+        filterable
+        placeholder="选择问卷"
+        style="width: 100%"
+      >
+        <el-option
+          v-for="q in questionnaires"
+          :key="q.id"
+          :value="q.id"
+          :label="`${q.title}（编号 ${q.id}，现有 ${q.question_count} 题）`"
+        />
+      </el-select>
+    </el-card>
 
+    <div class="step-title step-gap">
+      <span class="step-no">2</span>选一种方式导入
+    </div>
+
+    <!-- 方式一：从其他问卷复制 -->
     <el-card class="card" shadow="never">
+      <div class="way-head">
+        <div>
+          <div class="way-title">从其他问卷复制题目</div>
+          <div class="way-desc">
+            可以同时选几份问卷，勾选其中的部分或全部题目，连同选项分值、反向计分、图片、板块和维度一起复制过来。
+          </div>
+        </div>
+        <el-button type="primary" @click="openCopy">选择问卷和题目</el-button>
+      </div>
+      <template v-if="copyResult">
+        <el-alert
+          :title="copyResult.message"
+          type="success"
+          :closable="false"
+          show-icon
+          style="margin-top: 12px"
+        />
+        <el-button style="margin-top: 12px" @click="goEditQuestions"
+          >去「编辑题目」查看</el-button
+        >
+      </template>
+    </el-card>
+
+    <!-- 方式二：Excel -->
+    <el-card class="card" shadow="never">
+      <div class="way-title">从 Excel 文件导入</div>
+      <div class="way-desc" style="margin-bottom: 14px">
+        建议先点右上角「下载导入模板」照着填。题号和已有题目相同时会覆盖更新；表里没有的列，原来的设置保持不变，所以旧版表格照样能用。导出数据里的「题目与选项对照」表也能直接导入。
+      </div>
       <el-form label-width="96px">
-        <el-form-item label="导入到问卷">
-          <el-select
-            v-model="questionnaireId"
-            filterable
-            placeholder="选择问卷"
-            style="width: 100%"
-          >
-            <el-option
-              v-for="q in questionnaires"
-              :key="q.id"
-              :value="q.id"
-              :label="`${q.title}（编号 ${q.id}，现有 ${q.question_count} 题）`"
-            />
-          </el-select>
-        </el-form-item>
         <el-form-item label="Excel 文件">
           <el-upload
             ref="uploadRef"
@@ -261,6 +314,13 @@ onMounted(fetchQuestionnaires);
       </template>
     </el-card>
 
+    <CopyQuestionsDialog
+      v-if="questionnaireId"
+      v-model="showCopyDialog"
+      :target-id="questionnaireId"
+      @copied="onCopied"
+    />
+
     <el-collapse class="help">
       <el-collapse-item title="Excel 每一列怎么填" name="help">
         <el-table :data="columnHelp" size="small">
@@ -300,6 +360,49 @@ onMounted(fetchQuestionnaires);
 .card {
   margin-top: 16px;
   border: 1px solid #f0dcae;
+}
+.target-card {
+  background: #fffdf5;
+}
+.step-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  color: #3d2b12;
+  margin-bottom: 10px;
+}
+.step-gap {
+  margin: 22px 0 0;
+}
+.step-no {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #fbb034, #f4844c);
+  color: white;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.way-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+}
+.way-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #8b5a2b;
+  margin-bottom: 4px;
+}
+.way-desc {
+  font-size: 13px;
+  color: #777;
+  line-height: 1.6;
 }
 .upload-text {
   font-size: 14px;
