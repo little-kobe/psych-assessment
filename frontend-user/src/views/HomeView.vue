@@ -4,6 +4,10 @@
 defineProps({
   notFound: { type: Boolean, default: false },
 });
+
+// ICP 备案号：在服务器的 frontend-user/.env.production.local 里写 VITE_ICP_NO=备案号，打包时写进页面；
+// 没设置（比如本地开发）就不显示
+const icpNo = import.meta.env.VITE_ICP_NO || "";
 </script>
 
 <template>
@@ -73,6 +77,13 @@ defineProps({
         <p class="home-sub">如果链接打不开，请联系发放问卷的老师或研究者。</p>
       </div>
     </div>
+
+    <!-- 中国内地的服务器要求在网站首页底部中间显示备案号，并链接到工信部备案网站 -->
+    <footer v-if="icpNo" class="icp">
+      <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener">{{
+        icpNo
+      }}</a>
+    </footer>
   </div>
 </template>
 
@@ -94,7 +105,23 @@ defineProps({
   z-index: 1;
   max-width: 420px;
   margin: 0 auto;
-  padding: 18vh 20px 40px;
+  padding: 18vh 20px 72px;
+}
+.icp {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 18px;
+  z-index: 1;
+  text-align: center;
+  font-size: 12px;
+}
+.icp a {
+  color: #7d9a86;
+  text-decoration: none;
+}
+.icp a:hover {
+  text-decoration: underline;
 }
 .home-card {
   background: rgba(255, 255, 255, 0.92);

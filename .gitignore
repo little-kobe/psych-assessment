@@ -5,3 +5,5 @@ node_modules/
 backend/uploads/
 # 服务器上的配置（数据库密码、密钥），绝对不能传到 GitHub
 backend/.env
+# 服务器上的打包配置（如备案号 VITE_ICP_NO），只放在服务器上
+*.local
