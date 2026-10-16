@@ -2,6 +2,7 @@
 import { ref, onMounted, computed, watch } from "vue";
 import { useRoute } from "vue-router";
 import { API_BASE } from "../api.js";
+import { evaluateLogic, normalizeLogic } from "../logic.js";
 
 // 两种入口：/q/问卷编号（单份问卷）、/b/组合编号（问卷组合：依次作答几份问卷）
 const route = useRoute();
@@ -108,36 +109,77 @@ const parentQuestions = computed(() =>
 );
 const hasParentSection = computed(() => parentQuestions.value.length > 0);
 
-// 当前阶段：student 或 parent
-const currentPhase = ref("student");
-const currentQuestions = computed(() =>
-  currentPhase.value === "student"
-    ? studentQuestions.value
-    : parentQuestions.value,
-);
+// 作答顺序：学生（和通用）题在前，家长题在后
+const flowQuestions = computed(() => [
+  ...studentQuestions.value,
+  ...parentQuestions.value,
+]);
 
 // 答案和计时
 const answersMap = ref({});
 const questionDurations = ref({});
 const currentQuestionStartTime = ref(null);
-const currentIndex = ref(0);
+const currentId = ref(null); // 正在作答的题目 id
+
+// 题目逻辑（题目关联、跳题、选项关联）：按目前的答案算出显示哪些题、哪些选项、在哪一题结束
+const logicState = computed(() =>
+  evaluateLogic(flowQuestions.value, answersMap.value),
+);
+// 按逻辑应该显示的题（按作答顺序）
+const visibleFlow = computed(() => {
+  const shown = new Set(logicState.value.visible);
+  return flowQuestions.value.filter((q) => shown.has(q.id));
+});
+// 有题目逻辑时，总题数会随着作答变化，进度只显示「第 x 题」，不显示「共 n 题」
+const hasLogic = computed(() =>
+  allQuestions.value.some((q) => {
+    const lg = normalizeLogic(q.logic);
+    return !!(lg.display || lg.jump || lg.option_link);
+  }),
+);
+// 这份问卷是否被跳题逻辑判为无效答卷（答到了「直接提交为无效答卷」的选项）
+const endsInvalid = computed(() => !!logicState.value.end?.invalid);
 
 // 快速作答检测（阈值2秒）
 const MIN_DURATION_MS = 2000;
 const showSpeedWarning = ref(false);
 
 const currentQuestion = computed(
-  () => currentQuestions.value[currentIndex.value],
+  () => flowQuestions.value.find((q) => q.id === currentId.value) || null,
+);
+// 当前阶段：student 或 parent
+const currentPhase = computed(() =>
+  currentQuestion.value?.role === "parent" ? "parent" : "student",
+);
+// 当前阶段要显示的题（「第 x 题 / 共 n 题」按它算）
+const currentQuestions = computed(() =>
+  visibleFlow.value.filter(
+    (q) => (q.role === "parent" ? "parent" : "student") === currentPhase.value,
+  ),
+);
+const currentIndex = computed(() =>
+  Math.max(
+    0,
+    currentQuestions.value.findIndex((q) => q.id === currentId.value),
+  ),
+);
+const flowPos = computed(() =>
+  visibleFlow.value.findIndex((q) => q.id === currentId.value),
+);
+// 下一道、上一道要显示的题（跳题、题目关联已经算进去了）
+const nextVisible = computed(() => {
+  if (logicState.value.end && logicState.value.end.id === currentId.value)
+    return null; // 这一题之后结束作答
+  return flowPos.value >= 0
+    ? visibleFlow.value[flowPos.value + 1] || null
+    : null;
+});
+const prevVisible = computed(() =>
+  flowPos.value > 0 ? visibleFlow.value[flowPos.value - 1] : null,
 );
 const progressPercent = computed(() => {
-  const total = hasParentSection.value
-    ? allQuestions.value.length
-    : studentQuestions.value.length;
-  const done =
-    currentPhase.value === "student"
-      ? currentIndex.value
-      : studentQuestions.value.length + currentIndex.value;
-  return Math.round((done / total) * 100);
+  const total = visibleFlow.value.length;
+  return total > 0 ? Math.round((Math.max(0, flowPos.value) / total) * 100) : 0;
 });
 // 当前题所属的板块（有的话，题目上方显示板块标题和引导语）
 const currentSection = computed(() => {
@@ -145,12 +187,22 @@ const currentSection = computed(() => {
   return sid ? sections.value.find((s) => s.id === sid) || null : null;
 });
 
-const isLastQuestion = computed(
-  () => currentIndex.value === currentQuestions.value.length - 1,
-);
-const currentAnswer = computed(() =>
-  currentQuestion.value ? answersMap.value[currentQuestion.value.id] : null,
-);
+const isLastQuestion = computed(() => !nextVisible.value);
+// 当前题的答案：设了选项关联时，选中的选项被隐藏了就不算
+const currentAnswer = computed(() => {
+  const q = currentQuestion.value;
+  if (!q) return null;
+  return logicState.value.optionVisible[q.id]
+    ? logicState.value.effective[q.id]
+    : answersMap.value[q.id];
+});
+
+// 单选、多选题要显示的选项（设了选项关联时只显示符合条件的）
+function shownOptions(q) {
+  const all = parseOptions(q.options);
+  const vis = logicState.value.optionVisible[q.id];
+  return vis ? all.filter((o) => vis.includes(o.label)) : all;
+}
 
 // 正在答题（知情同意、基本信息都过了，还没交卷）
 const inQuiz = computed(
@@ -270,8 +322,7 @@ function startUnit() {
   allQuestions.value.forEach((q) => {
     questionDurations.value[q.id] = 0;
   });
-  currentIndex.value = 0;
-  currentPhase.value = "student";
+  currentId.value = visibleFlow.value[0]?.id ?? null;
   showDesc.value = false;
   showSpeedWarning.value = false;
   submitError.value = "";
@@ -392,34 +443,24 @@ function nextQuestion() {
   goNext();
 }
 
+// 下一题：按题目逻辑跳到下一道要显示的题（学生题答完会自动进入家长题）；没有了就提交
 function goNext() {
   showSpeedWarning.value = false;
-  if (isLastQuestion.value) {
-    if (currentPhase.value === "student" && hasParentSection.value) {
-      // 学生填完，进入家长阶段
-      currentPhase.value = "parent";
-      currentIndex.value = 0;
-      currentQuestionStartTime.value = Date.now();
-    } else {
-      submitQuestionnaire();
-    }
-  } else {
-    currentIndex.value++;
-    currentQuestionStartTime.value = Date.now();
-  }
-}
-
-function prevQuestion() {
-  if (currentIndex.value === 0 && currentPhase.value === "parent") {
-    // 家长阶段返回到学生最后一题
-    currentPhase.value = "student";
-    currentIndex.value = studentQuestions.value.length - 1;
-    currentQuestionStartTime.value = Date.now();
+  const next = nextVisible.value;
+  if (!next) {
+    submitQuestionnaire();
     return;
   }
-  if (currentIndex.value === 0) return;
+  currentId.value = next.id;
+  currentQuestionStartTime.value = Date.now();
+}
+
+// 上一题：回到上一道显示过的题（被跳过的题不会出现）
+function prevQuestion() {
+  const prev = prevVisible.value;
+  if (!prev) return;
   recordCurrentQuestionTime();
-  currentIndex.value--;
+  currentId.value = prev.id;
   currentQuestionStartTime.value = Date.now();
 }
 
@@ -451,8 +492,10 @@ async function submitQuestionnaire() {
   submitting.value = true;
   submitError.value = "";
   const finishedAt = Date.now();
-  const answers = allQuestions.value.map((q) => {
-    const ans = answersMap.value[q.id];
+  const invalid = endsInvalid.value;
+  // 只提交按逻辑显示了的题（被跳过、被隐藏的题不提交）；答案用逻辑处理后的（隐藏了的选项不算）
+  const answers = visibleFlow.value.map((q) => {
+    const ans = logicState.value.effective[q.id];
     const type = q.question_type || "scale";
     const opts = parseOptions(q.options);
 
@@ -513,6 +556,12 @@ async function submitQuestionnaire() {
     });
     const data = await response.json();
     if (!data.success) throw new Error(data.message);
+
+    // 被跳题逻辑判为无效答卷：不显示结果，组合里后面的问卷也不再作答
+    if (invalid || data.is_invalid) {
+      submitted.value = true;
+      return;
+    }
 
     // 拉取对受测者可见的结果
     const result = {
@@ -873,7 +922,9 @@ const nextUnitInfo = computed(() => units.value[unitIndex.value + 1] || null);
           ></div>
         </div>
         <p class="progress-label">
-          第 {{ currentIndex + 1 }} 题 / 共 {{ currentQuestions.length }} 题
+          第 {{ currentIndex + 1 }} 题<template v-if="!hasLogic">
+            / 共 {{ currentQuestions.length }} 题</template
+          >
           <span v-if="hasParentSection" style="margin-left: 8px; opacity: 0.6">
             （总进度 {{ progressPercent }}%）
           </span>
@@ -1009,7 +1060,7 @@ const nextUnitInfo = computed(() => units.value[unitIndex.value + 1] || null);
             @dragstart.prevent
           >
             <button
-              v-for="opt in parseOptions(currentQuestion.options)"
+              v-for="opt in shownOptions(currentQuestion)"
               :key="opt.label"
               class="image-option"
               :class="{ active: currentAnswer === opt.label }"
@@ -1030,7 +1081,7 @@ const nextUnitInfo = computed(() => units.value[unitIndex.value + 1] || null);
             class="text-options"
           >
             <button
-              v-for="opt in parseOptions(currentQuestion.options)"
+              v-for="opt in shownOptions(currentQuestion)"
               :key="opt.label"
               class="text-option-btn"
               :class="{ active: currentAnswer === opt.label }"
@@ -1054,7 +1105,7 @@ const nextUnitInfo = computed(() => units.value[unitIndex.value + 1] || null);
               @dragstart.prevent
             >
               <button
-                v-for="opt in parseOptions(currentQuestion.options)"
+                v-for="opt in shownOptions(currentQuestion)"
                 :key="opt.label"
                 class="image-option"
                 :class="{ active: isMultiSelected(opt.label) }"
@@ -1077,7 +1128,7 @@ const nextUnitInfo = computed(() => units.value[unitIndex.value + 1] || null);
           >
             <p class="multi-hint">可多选</p>
             <button
-              v-for="opt in parseOptions(currentQuestion.options)"
+              v-for="opt in shownOptions(currentQuestion)"
               :key="opt.label"
               class="text-option-btn"
               :class="{ active: isMultiSelected(opt.label) }"
@@ -1133,7 +1184,7 @@ const nextUnitInfo = computed(() => units.value[unitIndex.value + 1] || null);
           <button
             class="nav-btn secondary"
             @click="prevQuestion"
-            :disabled="currentIndex === 0 && currentPhase === 'student'"
+            :disabled="!prevVisible"
           >
             上一题
           </button>
@@ -1145,9 +1196,8 @@ const nextUnitInfo = computed(() => units.value[unitIndex.value + 1] || null);
             {{
               submitting
                 ? "正在提交…"
-                : isLastQuestion &&
-                    !(currentPhase === "student" && hasParentSection)
-                  ? isBundle && unitIndex < units.length - 1
+                : isLastQuestion
+                  ? isBundle && unitIndex < units.length - 1 && !endsInvalid
                     ? "提交这一份"
                     : "提交问卷"
                   : "下一题"

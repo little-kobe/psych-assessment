@@ -6,7 +6,9 @@ import Sortable from "sortablejs";
 import MediaListEditor from "../components/MediaListEditor.vue";
 import OptionImage from "../components/OptionImage.vue";
 import CopyQuestionsDialog from "../components/CopyQuestionsDialog.vue";
+import QuestionLogicDialog from "../components/QuestionLogicDialog.vue";
 import { API_BASE } from "../api.js";
+import { logicSummary, canLinkOptions } from "../logic.js";
 
 const SERVER = API_BASE;
 
@@ -22,6 +24,27 @@ const editingId = ref(null); // null表示新增，有值表示编辑
 const inheritedFrom = ref(null); // 新增题目时沿用了第几题的设置
 const sections = ref([]); // 板块引导语列表
 const showCopyDialog = ref(false); // 从其他问卷复制题目
+
+// ---------- 题目逻辑：题目关联、跳题逻辑、选项关联 ----------
+const showLogicDialog = ref(false);
+const logicMode = ref("display");
+const logicQuestion = ref(null);
+function openLogic(q, mode) {
+  logicQuestion.value = q;
+  logicMode.value = mode;
+  showLogicDialog.value = true;
+}
+// 每道题的逻辑说明（题目变化时重新算）
+const logicLines = computed(() => {
+  const map = {};
+  questions.value.forEach(
+    (q) => (map[q.id] = logicSummary(q, questions.value)),
+  );
+  return map;
+});
+const anyLogic = computed(() =>
+  Object.values(logicLines.value).some((lines) => lines.length > 0),
+);
 
 const defaultForm = () => ({
   content: "",
@@ -599,7 +622,7 @@ function setupSortable() {
   sortable = Sortable.create(listRef.value, {
     animation: 180,
     draggable: ".q-item",
-    filter: ".q-actions", // 在按钮、输入框上按下不会开始拖动
+    filter: ".q-actions, .q-logic", // 在按钮、输入框、逻辑设置上按下不会开始拖动
     preventOnFilter: false,
     ghostClass: "drag-ghost",
     chosenClass: "drag-chosen",
@@ -811,7 +834,15 @@ onMounted(() => {
       :closable="false"
       show-icon
       style="margin-bottom: 16px"
-      description="调整顺序：按住题目直接拖到想要的位置，松手自动保存；离得远的也可以在序号框输入目标位置后按回车，或点「置顶」。点「从其他问卷复制」可以把别的问卷里的题目直接拿过来。"
+      description="调整顺序：按住题目直接拖到想要的位置，松手自动保存；离得远的也可以在序号框输入目标位置后按回车，或点「置顶」。点「从其他问卷复制」可以把别的问卷里的题目直接拿过来。每道题下面的「题目关联」「跳题逻辑」「选项关联」可以设置显示条件和跳转。"
+    />
+    <el-alert
+      v-if="anyLogic"
+      type="warning"
+      :closable="false"
+      show-icon
+      style="margin-bottom: 16px"
+      description="这份问卷设置了题目逻辑。调整题目顺序、修改选项文字后，请看一眼各题下面的逻辑说明有没有出现 ⚠ 提醒。改完可以用答题链接自己走一遍。"
     />
 
     <div v-if="questions.length === 0 && !loading">
@@ -875,6 +906,33 @@ onMounted(() => {
                 <el-tag v-if="mediaSummary(q)" size="small" type="success"
                   >🖼 {{ mediaSummary(q) }}</el-tag
                 >
+              </div>
+              <!-- 题目逻辑：设置按钮 + 已有设置的说明（点说明也能打开修改） -->
+              <div class="q-logic">
+                <div class="logic-buttons">
+                  <el-button link size="small" @click="openLogic(q, 'display')"
+                    >题目关联</el-button
+                  >
+                  <el-button link size="small" @click="openLogic(q, 'jump')"
+                    >跳题逻辑</el-button
+                  >
+                  <el-button
+                    link
+                    size="small"
+                    :disabled="!canLinkOptions(q)"
+                    @click="openLogic(q, 'option')"
+                    >选项关联</el-button
+                  >
+                </div>
+                <div
+                  v-for="(line, li) in logicLines[q.id]"
+                  :key="li"
+                  class="logic-line"
+                  :class="{ warn: line.warn }"
+                  @click="openLogic(q, line.kind)"
+                >
+                  {{ line.warn ? "⚠ " : "" }}{{ line.text }}
+                </div>
               </div>
             </div>
             <div class="q-actions">
@@ -1131,6 +1189,14 @@ onMounted(() => {
       @copied="fetchQuestions"
     />
 
+    <QuestionLogicDialog
+      v-model="showLogicDialog"
+      :mode="logicMode"
+      :question="logicQuestion"
+      :questions="questions"
+      @saved="fetchQuestions"
+    />
+
     <!-- 板块引导语弹窗 -->
     <el-dialog
       v-model="showSectionDialog"
@@ -1292,6 +1358,31 @@ onMounted(() => {
 .q-range {
   font-size: 12px;
   color: #999;
+}
+.q-logic {
+  margin-top: 6px;
+  cursor: default;
+}
+.logic-buttons {
+  display: flex;
+  gap: 4px;
+}
+.logic-buttons :deep(.el-button + .el-button) {
+  margin-left: 8px;
+}
+.logic-line {
+  font-size: 12px;
+  color: #2f6fb0;
+  background: #f0f6fd;
+  border-radius: 4px;
+  padding: 3px 8px;
+  margin-top: 4px;
+  cursor: pointer;
+  line-height: 1.5;
+}
+.logic-line.warn {
+  color: #b5501f;
+  background: #fff1e8;
 }
 .q-actions {
   display: flex;

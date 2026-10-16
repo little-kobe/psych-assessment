@@ -288,6 +288,10 @@ onMounted(fetchStats);
         >）。<template v-if="overview.empty"
           >另有
           {{ overview.empty }} 份没有任何答案的空提交，不计入统计。</template
+        ><template v-if="overview.invalid"
+          >另有
+          {{ overview.invalid }}
+          份被跳题逻辑判为无效答卷，不计入统计。</template
         >
       </p>
 

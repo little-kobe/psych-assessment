@@ -192,6 +192,13 @@ async function exportData() {
   }
 }
 
+// 是否答完整：后端按题目逻辑算（被跳过的题不算缺）；旧版后端没有这个字段时按答题数判断
+function isComplete(row) {
+  return row.is_complete !== undefined
+    ? !!row.is_complete
+    : row.answer_count >= questions.value.length;
+}
+
 function formatDuration(seconds) {
   if (!seconds && seconds !== 0) return "-";
   if (seconds < 60) return `${seconds}秒`;
@@ -528,19 +535,19 @@ onMounted(fetchDetail);
               </el-table-column>
               <el-table-column label="状态" width="80">
                 <template #default="scope">
+                  <el-tooltip
+                    v-if="scope.row.is_invalid"
+                    content="答到了跳题逻辑里「直接提交为无效答卷」的选项，不计入统计"
+                    placement="top"
+                  >
+                    <el-tag type="danger" size="small">无效</el-tag>
+                  </el-tooltip>
                   <el-tag
-                    :type="
-                      scope.row.answer_count >= questions.length
-                        ? 'success'
-                        : 'warning'
-                    "
+                    v-else
+                    :type="isComplete(scope.row) ? 'success' : 'warning'"
                     size="small"
                   >
-                    {{
-                      scope.row.answer_count >= questions.length
-                        ? "完整"
-                        : "部分"
-                    }}
+                    {{ isComplete(scope.row) ? "完整" : "部分" }}
                   </el-tag>
                 </template>
               </el-table-column>

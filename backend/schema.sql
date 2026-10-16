@@ -3,9 +3,10 @@
 -- questions.section_id、score_rules.dimension_id、questionnaires.show_report_chart 列
 -- 包含 2026-10 第8轮新增的：norms 表；bundles.consent_text/shuffle、submissions.bundle_id/bundle_token/bundle_position、
 -- questionnaires.total_formula/norm_in_report、questions.media 列
+-- 包含 2026-10 第12轮新增的：questions.logic、submissions.is_invalid 列
 -- 用法（新电脑建库）：mysql -u root -p < schema.sql
 --   只会新建不存在的表，不会删除或覆盖已有数据；建好表后运行 backend/createAdmin.js 创建初始账号
--- 已有数据库升级：不要用这个文件，按顺序执行 backend/sql/ 里的 round4~round8 五个文件
+-- 已有数据库升级：不要用这个文件，按数字从小到大执行 backend/sql/ 里的 round4、round5 … round12 文件
 
 CREATE DATABASE IF NOT EXISTS `psych_assessment` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
 USE `psych_assessment`;
@@ -155,6 +156,7 @@ CREATE TABLE IF NOT EXISTS `questions` (
   `role` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT 'student' COMMENT '填写角色：student学生，parent家长，both通用',
   `section_id` int DEFAULT NULL COMMENT '所属板块（引导语）',
   `media` json NULL COMMENT '题目上方显示的图片/视频/音频，如[{"type":"image","url":"/uploads/xx.jpg"}]',
+  `logic` json NULL COMMENT '题目关联、跳题逻辑、选项关联的设置，NULL 表示没有',
   PRIMARY KEY (`id`) USING BTREE,
   KEY `questionnaire_id` (`questionnaire_id`) USING BTREE,
   KEY `section_id` (`section_id`),
@@ -223,6 +225,7 @@ CREATE TABLE IF NOT EXISTS `submissions` (
   `bundle_id` int NULL DEFAULT NULL COMMENT '通过哪个问卷组合提交，NULL 表示单独的问卷链接',
   `bundle_token` varchar(40) NULL DEFAULT NULL COMMENT '同一个人在一次组合作答中的几份问卷共用这个标记',
   `bundle_position` int NULL DEFAULT NULL COMMENT '这份问卷是他在组合里作答的第几份',
+  `is_invalid` tinyint(1) NOT NULL DEFAULT 0 COMMENT '1 = 被跳题逻辑判为无效答卷',
   PRIMARY KEY (`id`) USING BTREE,
   KEY `questionnaire_id` (`questionnaire_id`) USING BTREE,
   KEY `bundle_token` (`bundle_token`),

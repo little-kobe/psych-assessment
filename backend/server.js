@@ -13,6 +13,7 @@ const fs = require("fs");
 const crypto = require("crypto");
 const statsMath = require("./stats-math");
 const video = require("./video");
+const questionLogic = require("./logic"); // 题目关联、跳题逻辑、选项关联
 
 // 配置：上线时写在 backend/.env 文件里（数据库密码、JWT 密钥等），本地没有这个文件就用下面的默认值
 const ENV_FILE = path.join(__dirname, ".env");
@@ -286,7 +287,7 @@ async function calcDimensionAverages(
   const [allAnswers] = await connection.execute(
     `SELECT a.* FROM answers a
      INNER JOIN submissions s ON a.submission_id = s.id
-     WHERE s.questionnaire_id = ?`,
+     WHERE s.questionnaire_id = ? AND s.is_invalid = 0`,
     [questionnaireId],
   );
   // 按提交分组
@@ -630,7 +631,7 @@ app.get("/api/questionnaire/:id", async (req, res) => {
     // 检查是否已达到最大回收数量
     if (questionnaire.max_responses) {
       const [countRows] = await connection.execute(
-        "SELECT COUNT(*) AS total FROM submissions WHERE questionnaire_id = ?",
+        "SELECT COUNT(*) AS total FROM submissions WHERE questionnaire_id = ? AND is_invalid = 0",
         [questionnaireId],
       );
       if (countRows[0].total >= questionnaire.max_responses) {
@@ -720,8 +721,23 @@ app.post("/api/submission", async (req, res) => {
     )
       durationSec = 0;
 
+    // 题目逻辑：按受测者的答案判断哪些题应该显示、是否被跳题逻辑判为无效答卷。
+    // 有逻辑时只保存应该显示的题的答案（旧版页面缓存在手机上时，可能把隐藏的题也交上来）
+    let answerList = Array.isArray(answers) ? answers : [];
+    let isInvalid = 0;
+    const [logicQuestions] = await connection.execute(
+      "SELECT id, order_num, question_type, options, role, logic FROM questions WHERE questionnaire_id = ?",
+      [questionnaire_id],
+    );
+    if (questionLogic.anyLogic(logicQuestions)) {
+      const check = questionLogic.checkSubmission(logicQuestions, answerList);
+      const shown = new Set(check.visible);
+      answerList = answerList.filter((a) => shown.has(Number(a.question_id)));
+      isInvalid = check.invalid ? 1 : 0;
+    }
+
     const [submissionResult] = await connection.execute(
-      "INSERT INTO submissions (questionnaire_id, started_at, finished_at, tracking_code, group_label, bundle_id, bundle_token, bundle_position) VALUES (?, DATE_SUB(NOW(), INTERVAL ? SECOND), NOW(), ?, ?, ?, ?, ?)",
+      "INSERT INTO submissions (questionnaire_id, started_at, finished_at, tracking_code, group_label, bundle_id, bundle_token, bundle_position, is_invalid) VALUES (?, DATE_SUB(NOW(), INTERVAL ? SECOND), NOW(), ?, ?, ?, ?, ?, ?)",
       [
         questionnaire_id,
         durationSec,
@@ -730,6 +746,7 @@ app.post("/api/submission", async (req, res) => {
         bundleId,
         bundleToken,
         bundlePosition,
+        isInvalid,
       ],
     );
     const submissionId = submissionResult.insertId;
@@ -751,7 +768,7 @@ app.post("/api/submission", async (req, res) => {
       }
     }
 
-    for (const ans of answers) {
+    for (const ans of answerList) {
       await connection.execute(
         "INSERT INTO answers (submission_id, question_id, answer_value, answer_text, duration_ms) VALUES (?, ?, ?, ?, ?)",
         [
@@ -769,6 +786,7 @@ app.post("/api/submission", async (req, res) => {
       success: true,
       message: "问卷提交成功",
       submission_id: submissionId,
+      is_invalid: isInvalid === 1,
     });
   } catch (err) {
     await connection.end();
@@ -1682,10 +1700,13 @@ app.get(
       // 构建表头
       // 基本信息列（放在最前面）
       const infoHeaders = infoFields.map((f) => f.field_label);
+      // 有被跳题逻辑判为无效的答卷时，加一列「答卷状态」，方便筛掉
+      const hasInvalid = submissions.some((s) => s.is_invalid);
       const fixedHeaders = [
         "提交ID",
         "追踪码",
         "分组",
+        ...(hasInvalid ? ["答卷状态"] : []),
         ...infoHeaders,
         "开始时间",
         "完成时间",
@@ -1780,6 +1801,7 @@ app.get(
           sub.id,
           sub.tracking_code || "",
           sub.group_label || "",
+          ...(hasInvalid ? [sub.is_invalid ? "无效（跳题逻辑）" : "有效"] : []),
           ...infoCols,
           sub.started_at
             ? new Date(sub.started_at).toLocaleString("zh-CN")
@@ -2113,6 +2135,9 @@ app.get(
           ...sub,
           total_score: dimensions.length > 0 ? totalScore : null,
           dimension_scores: dimensionScores,
+          // 是否答完整：按题目逻辑，应该显示的题都答了（被跳过的题不算缺）
+          is_complete: questionLogic.checkSubmission(questions, answers)
+            .complete,
         };
       });
 
@@ -2629,6 +2654,41 @@ app.put(
   },
 );
 
+// 保存一道题的逻辑（题目关联、跳题逻辑、选项关联），body: { logic }，格式见 logic.js
+app.put(
+  "/api/questions/:id/logic",
+  verifyAdminToken,
+  requireAccess("question"),
+  async (req, res) => {
+    const questionId = Number(req.params.id);
+    try {
+      const connection = await mysql.createConnection(dbConfig);
+      const [rows] = await connection.execute(
+        "SELECT questionnaire_id FROM questions WHERE id = ?",
+        [questionId],
+      );
+      const [siblings] = await connection.execute(
+        "SELECT id FROM questions WHERE questionnaire_id = ?",
+        [rows[0].questionnaire_id],
+      );
+      const logic = questionLogic.sanitizeLogic(
+        req.body.logic,
+        new Set(siblings.map((q) => Number(q.id))),
+        questionId,
+      );
+      await connection.execute("UPDATE questions SET logic = ? WHERE id = ?", [
+        logic ? JSON.stringify(logic) : null,
+        questionId,
+      ]);
+      await connection.end();
+      res.json({ success: true, message: "逻辑已保存", logic });
+    } catch (err) {
+      console.error("保存题目逻辑失败:", err);
+      res.status(500).json({ success: false, message: "服务器错误" });
+    }
+  },
+);
+
 // 删除单道题目
 app.delete(
   "/api/questions/:id",
@@ -2638,6 +2698,29 @@ app.delete(
     const questionId = req.params.id;
     try {
       const connection = await mysql.createConnection(dbConfig);
+      // 其他题目的逻辑里引用了这道题的部分（条件、跳到这题、选项跟随这题）一并去掉
+      const [selfRows] = await connection.execute(
+        "SELECT questionnaire_id FROM questions WHERE id = ?",
+        [questionId],
+      );
+      if (selfRows.length > 0) {
+        const [others] = await connection.execute(
+          "SELECT id, logic FROM questions WHERE questionnaire_id = ? AND id <> ? AND logic IS NOT NULL",
+          [selfRows[0].questionnaire_id, questionId],
+        );
+        for (const o of others) {
+          const { logic, changed } = questionLogic.stripReference(
+            o.logic,
+            questionId,
+          );
+          if (changed) {
+            await connection.execute(
+              "UPDATE questions SET logic = ? WHERE id = ?",
+              [logic ? JSON.stringify(logic) : null, o.id],
+            );
+          }
+        }
+      }
       // 先删关联答案，再删题目
       await connection.execute("DELETE FROM answers WHERE question_id = ?", [
         questionId,
@@ -3199,16 +3282,25 @@ async function computeStats(connection, questionnaireId, admin, opts) {
   // ---- 第一步：按条件筛选提交 ----
   const groupKey = (s) => s.group_label || NO_GROUP;
   let emptyCount = 0;
+  let invalidCount = 0;
   let incompleteCount = 0;
   let fastCount = 0;
   const kept = []; // 通过「完整 / 过快」筛选的（分组对比用）
   submissions.forEach((s) => {
     const answers = answersBySub[s.id] || [];
+    if (s.is_invalid) {
+      invalidCount++; // 被跳题逻辑判为无效答卷的，一律不统计
+      return;
+    }
     if (answers.length === 0) {
       emptyCount++; // 没有任何答案的提交，一律不统计
       return;
     }
-    if (completeOnly && answers.length < questions.length) {
+    // 完整：按题目逻辑应该显示的题都答了（被跳过的题不算缺）
+    if (
+      completeOnly &&
+      !questionLogic.checkSubmission(questions, answers).complete
+    ) {
       incompleteCount++;
       return;
     }
@@ -3270,9 +3362,10 @@ async function computeStats(connection, questionnaireId, admin, opts) {
     label: g === NO_GROUP ? "未分组" : g,
   }));
   const overview = {
-    total_with_answers: submissions.length - emptyCount,
+    total_with_answers: submissions.length - emptyCount - invalidCount,
     valid: valid.length,
     empty: emptyCount,
+    invalid: invalidCount,
     excluded_incomplete: incompleteCount,
     excluded_fast: fastCount,
     duration: describe(seconds),
@@ -3769,6 +3862,12 @@ app.get(
           .join("；"),
       ]);
       info.addRow(["有效作答", `${st.overview.valid} 份`]);
+      if (st.overview.invalid > 0) {
+        info.addRow([
+          "无效答卷",
+          `${st.overview.invalid} 份（被跳题逻辑判为无效，不计入统计）`,
+        ]);
+      }
       info.addRow([
         "作答用时",
         st.overview.duration.n > 0
@@ -4699,11 +4798,19 @@ app.get("/api/bundles/:id/export", verifyAdminToken, async (req, res) => {
     subs.forEach((s) => {
       let p = byToken[s.bundle_token];
       if (!p) {
-        p = { token: s.bundle_token, subs: {}, first: s, info: {} };
+        p = {
+          token: s.bundle_token,
+          subs: {},
+          invalid: [],
+          first: s,
+          info: {},
+        };
         byToken[s.bundle_token] = p;
         people.push(p);
       }
-      if (!p.subs[s.questionnaire_id]) p.subs[s.questionnaire_id] = s;
+      // 被跳题逻辑判为无效的那份不算分，只在「作答顺序」里注明
+      if (s.is_invalid) p.invalid.push(s);
+      else if (!p.subs[s.questionnaire_id]) p.subs[s.questionnaire_id] = s;
       Object.assign(p.info, infoBySub[s.id] || {});
     });
 
@@ -4777,11 +4884,12 @@ app.get("/api/bundles/:id/export", verifyAdminToken, async (req, res) => {
       const infoMap = {};
       Object.values(p.info).forEach((it) => (infoMap[it.field_key] = it.value));
       const done = units.filter((u) => p.subs[u.q.id]);
-      const order = Object.values(p.subs)
+      const order = [...Object.values(p.subs), ...p.invalid]
         .sort((a, b) => (a.bundle_position || 0) - (b.bundle_position || 0))
         .map((s) => {
           const idx = units.findIndex((u) => u.q.id === s.questionnaire_id);
-          return idx >= 0 ? shortName(units[idx], idx) : "";
+          const name = idx >= 0 ? shortName(units[idx], idx) : "";
+          return s.is_invalid ? `${name}（无效答卷）` : name;
         })
         .join(" → ");
       const scoreCells = [];
@@ -5022,6 +5130,20 @@ app.post(
           ],
         );
         newIdOf[q.id] = r.insertId;
+      }
+
+      // 题目逻辑：引用的题目也一起复制了的，换成新题目；引用了没复制的题目的部分去掉
+      for (const q of sources) {
+        if (!q.logic) continue;
+        const logic = questionLogic.remapLogic(q.logic, (id) =>
+          newIdOf[id] !== undefined ? newIdOf[id] : null,
+        );
+        if (logic) {
+          await connection.execute(
+            "UPDATE questions SET logic = ? WHERE id = ?",
+            [JSON.stringify(logic), newIdOf[q.id]],
+          );
+        }
       }
 
       // 维度：按名称并入本问卷已有的同名维度，没有就新建（连同计分方式和说明）
