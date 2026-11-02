@@ -1,8 +1,9 @@
 <script setup>
 import { ref } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { API_BASE } from "../api.js";
 
+const route = useRoute();
 const router = useRouter();
 const username = ref("");
 const password = ref("");
@@ -33,7 +34,9 @@ async function handleLogin() {
       localStorage.setItem("admin_token", data.token);
       localStorage.setItem("admin_role", data.role);
       localStorage.setItem("admin_name", data.displayName);
-      router.push("/");
+      // 登录前想去的页面（如直接打开某份问卷的链接），登录后回到那里
+      const to = route.query.redirect;
+      router.push(typeof to === "string" && to.startsWith("/") ? to : "/");
     } else {
       errorMsg.value = data.message || "登录失败";
     }
@@ -155,8 +158,8 @@ async function handleLogin() {
             <circle cx="17.5" cy="13" r="1.4" fill="white" opacity="0.9" />
           </svg>
         </div>
-        <h1>心理测评管理平台</h1>
-        <p class="subtitle">运动心理学研究 · 智能数据分析</p>
+        <h1>管理平台</h1>
+        <p class="subtitle">心理测评研究 · 智能数据分析</p>
       </div>
 
       <form @submit.prevent="handleLogin" class="form">

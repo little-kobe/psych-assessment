@@ -1,7 +1,7 @@
 <script setup>
 import { API_BASE } from "../api.js";
 // 常模设置：录入量表手册 / 文献里的常模均值和标准差，可以按性别、年级等分成几套
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, inject, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 
@@ -120,9 +120,12 @@ function conditionSummary(n) {
     .join("，并且 ");
 }
 
-const chartOff = computed(
-  () => questionnaire.value && !questionnaire.value.show_report_chart,
-);
+// 「结果图表」开没开：优先用外框里的问卷信息（在顶部「设置」里改了马上能反映出来）
+const shell = inject("questionnaireShell", null);
+const chartOff = computed(() => {
+  const q = shell?.questionnaire.value || questionnaire.value;
+  return !!q && !q.show_report_chart;
+});
 
 async function save() {
   for (const [i, n] of norms.value.entries()) {
@@ -205,14 +208,9 @@ onMounted(load);
 
 <template>
   <div class="container" v-loading="loading">
-    <el-button text @click="router.push(`/questionnaire/${questionnaireId}`)"
-      >← 返回问卷详情</el-button
-    >
-
     <div class="header">
       <div>
         <h2>常模设置</h2>
-        <p class="sub" v-if="questionnaire">{{ questionnaire.title }}</p>
       </div>
       <div>
         <el-button @click="addNorm">添加一套常模</el-button>
@@ -241,8 +239,7 @@ onMounted(load);
         active-text="在受测者的结果图表里显示常模平均（和「你的得分」「平均分」并排）"
       />
       <p v-if="chartOff" class="tip warn">
-        这份问卷还没打开「结果图表」，受测者看不到图表。需要的话到问卷详情 →
-        「编辑问卷」里打开。
+        这份问卷还没打开「结果图表」，受测者看不到图表。需要的话点页面右上角「设置」，打开「结果图表」。
       </p>
     </el-card>
 
@@ -398,9 +395,8 @@ onMounted(load);
 
 <style scoped>
 .container {
-  max-width: 860px;
-  margin: 20px auto;
-  padding: 24px;
+  /* 显示在问卷外框（QuestionnaireShell）里，宽度跟外框一致 */
+  padding-bottom: 24px;
 }
 .header {
   display: flex;

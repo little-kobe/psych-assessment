@@ -281,9 +281,9 @@ onMounted(fetchAdmins);
 
 <style scoped>
 .container {
-  max-width: 800px;
-  margin: 20px auto;
-  padding: 24px;
+  max-width: 880px;
+  margin: 0 auto;
+  padding-bottom: 24px;
 }
 .header {
   display: flex;
@@ -293,7 +293,8 @@ onMounted(fetchAdmins);
 }
 .header h2 {
   margin: 0;
-  font-size: 20px;
+  font-size: 22px;
+  font-weight: 650;
   color: #3d2b12;
 }
 </style>

@@ -23,12 +23,23 @@ const relMeasure = ref(""); // 「信度分析」里当前查看项目分析的�
 const compareGroups = ref([]); // 参与差异检验的分组（空 = 自动选）
 const exporting = ref(false);
 
+// 按键作答统计
+const keyTrim = ref("3000"); // 异常题次怎么排除（和后端 key-stats.js 一致）
+const keyScope = ref("all"); // 被试内分析看哪些人：全部 / 只看键盘 / 只看触屏
+const keyTrimOptions = [
+  { value: "3000", label: "按住超过 3 秒的题次不算" },
+  { value: "2000", label: "按住超过 2 秒的题次不算" },
+  { value: "sd3", label: "超出本人平均 ±3 个标准差的不算" },
+  { value: "none", label: "不排除" },
+];
+
 // 当前的筛选条件（统计和导出共用）
 function queryParams() {
   const params = new URLSearchParams({
     group: groupFilter.value,
     complete_only: completeOnly.value ? "1" : "0",
     exclude_fast: excludeFast.value ? "1" : "0",
+    key_trim: keyTrim.value,
   });
   if (compareGroups.value.length > 0) {
     params.set("compare_groups", compareGroups.value.join(","));
@@ -135,6 +146,37 @@ const currentRel = computed(() =>
 const groupTests = computed(() => stats.value?.group_tests);
 const normCompare = computed(() => stats.value?.norm_compare);
 
+// ---------- 按键作答 ----------
+const keyData = computed(() => stats.value?.key);
+const keyScopeOptions = computed(() => {
+  const scopes = keyData.value?.scopes || {};
+  return [
+    { value: "all", label: "全部（合在一起）" },
+    { value: "key", label: "只看键盘" },
+    { value: "touch", label: "只看触屏" },
+  ].filter((o) => scopes[o.value]);
+});
+const keyScopeData = computed(() => {
+  const scopes = keyData.value?.scopes || {};
+  return scopes[keyScope.value] || scopes.all || null;
+});
+
+function pText(p) {
+  if (p === null || p === undefined) return "";
+  return p < 0.001 ? "p < .001" : `p = ${fmtP(p)}`;
+}
+
+// 「每多按 100 毫秒，把握程度……」
+function slopeText(s) {
+  if (s === null || s === undefined) return "";
+  if (s === 0) return "基本不变";
+  return `${s < 0 ? "降低" : "提高"} ${Math.abs(s)} 分`;
+}
+
+function fmtMs(v) {
+  return v === null || v === undefined ? "-" : `${v}`;
+}
+
 function effectLevel(r) {
   if (!r || r.effect === null) return "";
   const v = Math.abs(r.effect);
@@ -211,21 +253,14 @@ function itemMeta(item) {
 
 const openExpanded = ref({}); // 开放题是否展开全部回答
 
-function goBack() {
-  router.push(`/questionnaire/${questionnaireId}`);
-}
-
 onMounted(fetchStats);
 </script>
 
 <template>
   <div class="container" v-loading="loading">
-    <el-button @click="goBack" text>← 返回问卷详情</el-button>
-
     <div class="page-head">
       <div>
         <h2>统计分析</h2>
-        <p class="sub" v-if="stats">{{ stats.questionnaire.title }}</p>
       </div>
       <el-button
         v-if="stats && overview.valid > 0"
@@ -761,6 +796,289 @@ onMounted(fetchStats);
           </div>
         </section>
 
+        <!-- 按键作答 -->
+        <section class="block" v-if="keyData && keyData.has_key">
+          <h3>按键作答（按住时长）</h3>
+          <p class="muted">
+            只统计用按键方式作答的答卷（{{ keyData.persons }} 份，{{
+              keyData.total_trials
+            }}
+            个题次）。按住时长 = 按下 → 松开，按下用时 = 题目出现 →
+            按下，单位毫秒。按得越久通常表示越没把握（Zhou
+            等，2026，PNAS），但效应很小：适合看同一个人内部的变化和整体规律，不能用来判断某一个人。
+          </p>
+          <div class="key-controls">
+            <span class="filter-label">异常题次</span>
+            <el-select
+              v-model="keyTrim"
+              style="width: 260px"
+              @change="fetchStats"
+            >
+              <el-option
+                v-for="o in keyTrimOptions"
+                :key="o.value"
+                :value="o.value"
+                :label="o.label"
+              />
+            </el-select>
+            <span class="muted-inline">{{
+              keyData.excluded_trials > 0
+                ? `排除了 ${keyData.excluded_trials} 个题次，下面的数字都不含它们`
+                : "没有题次被排除"
+            }}</span>
+          </div>
+
+          <h4>按作答输入分开</h4>
+          <el-table :data="keyData.devices" size="small">
+            <el-table-column prop="label" label="作答输入" width="96" />
+            <el-table-column prop="persons" label="人数" width="60" />
+            <el-table-column prop="trials" label="题次" width="64" />
+            <el-table-column label="按住时长 中位数（四分位）" min-width="170">
+              <template #default="{ row }"
+                ><b>{{ fmtMs(row.hold.median) }}</b>
+                <span class="muted-inline"
+                  >（{{ fmtMs(row.hold.q1) }} ~ {{ fmtMs(row.hold.q3) }}）</span
+                ></template
+              >
+            </el-table-column>
+            <el-table-column label="平均 ± 标准差" min-width="120">
+              <template #default="{ row }"
+                >{{ fmtMs(row.hold.mean) }}
+                <span class="muted-inline" v-if="row.hold.sd !== null"
+                  >± {{ row.hold.sd }}</span
+                ></template
+              >
+            </el-table-column>
+            <el-table-column label="每人中位数 平均 ± 标准差" min-width="150">
+              <template #default="{ row }"
+                >{{ fmtMs(row.person_median.mean) }}
+                <span class="muted-inline" v-if="row.person_median.sd !== null"
+                  >± {{ row.person_median.sd }}</span
+                ></template
+              >
+            </el-table-column>
+            <el-table-column label="按下用时 中位数" width="120">
+              <template #default="{ row }">{{ fmtMs(row.rt_median) }}</template>
+            </el-table-column>
+            <el-table-column
+              v-if="keyData.has_confidence"
+              label="平均把握"
+              width="80"
+            >
+              <template #default="{ row }">{{
+                fmtNum(row.conf_mean)
+              }}</template>
+            </el-table-column>
+          </el-table>
+          <p
+            class="muted key-hist-note"
+            v-if="keyData.devices.some((d) => d.value === 'mixed')"
+          >
+            「键盘+触屏」是同一份答卷里两种都用过的人（比如带触摸屏的笔记本）；下面的分布图按每个题次实际用的输入方式分，所以题次数和上表不完全一样。
+          </p>
+          <div class="key-hists">
+            <div v-for="h in keyData.histograms" :key="h.value">
+              <h4>{{ h.label }}：按住时长分布（{{ h.n }} 个题次）</h4>
+              <BarChart
+                :categories="h.bins.map((b) => b.label)"
+                :values="h.bins.map((b) => b.count)"
+                y-name="题次"
+                :color="h.value === 'touch' ? '#4a90a4' : '#d9692f'"
+                :height="200"
+                :tooltip="
+                  (i) =>
+                    `${h.bins[i].label} 毫秒：${h.bins[i].count} 个题次（${pct(h.bins[i].count, h.n)}%）`
+                "
+              />
+            </div>
+          </div>
+
+          <div class="sub-block" v-if="keyScopeData">
+            <div class="key-scope-head">
+              <h4>被试内分析</h4>
+              <el-radio-group
+                v-if="keyScopeOptions.length > 1"
+                v-model="keyScope"
+                size="small"
+              >
+                <el-radio-button
+                  v-for="o in keyScopeOptions"
+                  :key="o.value"
+                  :value="o.value"
+                  >{{ o.label }}</el-radio-button
+                >
+              </el-radio-group>
+            </div>
+            <p class="muted">
+              每个人只和自己比（自己按得长的题和按得短的题比），所以键盘和触屏、按键快慢习惯不同的人可以合在一起看。
+            </p>
+            <p class="key-warn" v-if="keyScopeData.persons < 10">
+              这里只有 {{ keyScopeData.persons }}
+              人，人数太少，下面的结果只能看个大概，不能下结论。
+            </p>
+            <template v-if="keyData.has_confidence">
+              <div v-if="keyScopeData.bins" class="key-bins">
+                <div>
+                  <BarChart
+                    :categories="
+                      keyScopeData.bins.map(
+                        (b) =>
+                          `${b.label}（约 ${Math.round(b.hold_mean)} 毫秒）`,
+                      )
+                    "
+                    :values="keyScopeData.bins.map((b) => b.conf_mean)"
+                    y-name="平均把握（1-5）"
+                    :integer="false"
+                    :height="220"
+                    :tooltip="
+                      (i) => {
+                        const b = keyScopeData.bins[i];
+                        return `${b.label}：平均把握 ${b.conf_mean}，95% 置信区间 ${fmtNum(b.ci_low)} ~ ${fmtNum(b.ci_high)}（${b.persons} 人）`;
+                      }
+                    "
+                  />
+                </div>
+                <div class="key-bins-text">
+                  <p>
+                    每人把自己的题次按按住时长从短到长分成三份，算每份的平均把握，再对所有人求平均（{{
+                      keyScopeData.bins[0].persons
+                    }}
+                    人，每人至少 3
+                    个题次）。按住越长、把握越低，三根柱子就会越来越矮。
+                  </p>
+                  <p v-for="b in keyScopeData.bins" :key="b.label">
+                    {{ b.label }}：{{ fmtNum(b.conf_mean) }}
+                    <span class="muted-inline"
+                      >（95% 置信区间 {{ fmtNum(b.ci_low) }} ~
+                      {{ fmtNum(b.ci_high) }}）</span
+                    >
+                  </p>
+                </div>
+              </div>
+              <p class="key-result" v-if="keyScopeData.hold_conf">
+                <b>按住时长和把握程度</b>：被试内相关
+                <template v-if="keyScopeData.hold_conf.r !== null"
+                  >r({{ keyScopeData.hold_conf.df }}) =
+                  {{ keyScopeData.hold_conf.r }}，<span
+                    :class="{
+                      sig:
+                        keyScopeData.hold_conf.p !== null &&
+                        keyScopeData.hold_conf.p < 0.05,
+                    }"
+                    >{{ pText(keyScopeData.hold_conf.p) }}</span
+                  >；每多按 100 毫秒，把握程度平均{{
+                    slopeText(keyScopeData.hold_conf.slope100)
+                  }}</template
+                ><template v-else>算不出来（每人的把握程度都没有变化）</template
+                >（{{ keyScopeData.hold_conf.persons }} 人、{{
+                  keyScopeData.hold_conf.trials
+                }}
+                个题次）。论文实验 1 约为每 100 毫秒降低 0.09 分。
+              </p>
+            </template>
+            <p v-else class="muted">
+              这份问卷没有问把握程度，所以检验不了按住时长和把握的关系；需要的话在问卷「编辑
+              → 答题方式」里打开「每题问把握程度」。
+            </p>
+            <p class="key-result" v-if="keyScopeData.rt_hold">
+              <b>按下用时和按住时长</b>：每人算一个相关，平均 r =
+              {{ keyScopeData.rt_hold.mean_r }}（{{
+                keyScopeData.rt_hold.persons
+              }}
+              人）<template v-if="keyScopeData.rt_hold.t !== null"
+                >，t({{ keyScopeData.rt_hold.df }}) =
+                {{ keyScopeData.rt_hold.t }}，{{
+                  pText(keyScopeData.rt_hold.p)
+                }}</template
+              >。论文里两者基本无关（平均 r ≈
+              0.01）；如果这里明显相关，说明按住时长里混进了反应快慢，解读时要小心。
+            </p>
+          </div>
+
+          <div class="sub-block" v-if="keyData.items.length > 0">
+            <h4>每道题</h4>
+            <p class="muted">
+              被试内标准分：这一题的按住时长比这个人自己平时长（大于
+              0）还是短（小于 0），以本人的标准差为单位，再对所有人求平均；大于
+              0
+              的题，大家按得比平时久，可能更没把握或更难回答。键盘和触屏可以合在一起比较。
+            </p>
+            <el-table :data="keyData.items" size="small">
+              <el-table-column label="题号" width="64">
+                <template #default="{ row }">Q{{ row.order_num }}</template>
+              </el-table-column>
+              <el-table-column
+                prop="content"
+                label="题目"
+                min-width="200"
+                show-overflow-tooltip
+              />
+              <el-table-column prop="trials" label="题次" width="60" />
+              <el-table-column label="键盘 中位数" width="96">
+                <template #default="{ row }">{{
+                  row.key_n ? fmtMs(row.key_median) : "-"
+                }}</template>
+              </el-table-column>
+              <el-table-column label="触屏 中位数" width="96">
+                <template #default="{ row }">{{
+                  row.touch_n ? fmtMs(row.touch_median) : "-"
+                }}</template>
+              </el-table-column>
+              <el-table-column label="被试内标准分" width="110">
+                <template #default="{ row }">
+                  <span
+                    :class="{
+                      weak: row.z_mean !== null && row.z_mean >= 0.3,
+                    }"
+                    >{{
+                      row.z_mean === null
+                        ? "-"
+                        : (row.z_mean > 0 ? "+" : "") + row.z_mean
+                    }}</span
+                  >
+                </template>
+              </el-table-column>
+              <el-table-column
+                v-if="keyData.has_confidence"
+                label="平均把握"
+                width="80"
+              >
+                <template #default="{ row }">{{
+                  fmtNum(row.conf_mean)
+                }}</template>
+              </el-table-column>
+              <el-table-column label="按下用时 中位数" width="120">
+                <template #default="{ row }">{{
+                  fmtMs(row.rt_median)
+                }}</template>
+              </el-table-column>
+            </el-table>
+          </div>
+
+          <div class="key-tips">
+            <b>手机（触屏）和电脑（键盘）的数据怎么处理</b>
+            <ol>
+              <li>
+                绝对时长（毫秒）分开看：手指按屏幕和按键盘是不同的动作，上面的表和分布图已经按「作答输入」分开。
+              </li>
+              <li>
+                想合在一起分析，用被试内的指标：三档、被试内相关、每题的被试内标准分，每个人只和自己比，设备差异和个人快慢习惯都消掉了。
+              </li>
+              <li>
+                比较不同的人（比如按住时长和总分有没有关系）时，用每人的中位数（导出的「按键数据（每人一行）」里有），并且在同一种设备内比较，或者把作答输入作为控制变量。
+              </li>
+              <li>
+                研究设计上最省事的是统一设备：电脑发「按键作答」链接，手机发「点击作答」链接（生成链接时可以选）。
+              </li>
+              <li>
+                正式分析建议用导出的「按键数据（每题一行）」做混合效应模型：把握程度
+                ~ 按住时长 + 按下用时 +
+                作答输入，被试作为随机截距（论文的做法）。
+              </li>
+            </ol>
+          </div>
+        </section>
+
         <!-- 逐题分析 -->
         <section class="block">
           <h3>逐题分析</h3>
@@ -828,9 +1146,8 @@ onMounted(fetchStats);
 
 <style scoped>
 .container {
-  max-width: 1000px;
-  margin: 20px auto;
-  padding: 24px;
+  /* 显示在问卷外框（QuestionnaireShell）里，宽度跟外框一致 */
+  padding-bottom: 24px;
 }
 .page-head {
   margin: 12px 0 16px;
@@ -1061,8 +1378,80 @@ onMounted(fetchStats);
   border-radius: 6px;
   color: #444;
 }
+.key-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin: 4px 0 14px;
+}
+.key-hist-note {
+  margin: 10px 0 0;
+}
+.key-warn {
+  font-size: 12px;
+  color: #b88230;
+  background: #fff8e7;
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin: 0 0 10px;
+}
+.key-hists {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 16px;
+  margin-top: 14px;
+}
+.key-scope-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.key-scope-head h4 {
+  margin: 0;
+}
+.key-bins {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: 20px;
+  align-items: center;
+}
+.key-bins-text {
+  font-size: 13px;
+  color: #5a4a2e;
+  line-height: 1.7;
+}
+.key-bins-text p {
+  margin: 0 0 4px;
+}
+.key-result {
+  font-size: 13px;
+  color: #3d2b12;
+  line-height: 1.8;
+  margin: 10px 0 0;
+}
+.key-tips {
+  margin-top: 18px;
+  background: #f6f9fb;
+  border: 1px solid #dde8ee;
+  border-radius: 8px;
+  padding: 12px 16px;
+  font-size: 13px;
+  color: #3d4a52;
+  line-height: 1.7;
+}
+.key-tips ol {
+  margin: 6px 0 0;
+  padding-left: 20px;
+}
 @media (max-width: 760px) {
   .measure-detail {
+    grid-template-columns: 1fr;
+  }
+  .key-bins {
     grid-template-columns: 1fr;
   }
 }

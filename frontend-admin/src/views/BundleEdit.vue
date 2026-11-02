@@ -6,6 +6,7 @@ import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import Sortable from "sortablejs";
 import ShareLinkDialog from "../components/ShareLinkDialog.vue";
+import PageCrumbs from "../components/PageCrumbs.vue";
 
 const SERVER = API_BASE;
 const route = useRoute();
@@ -186,7 +187,12 @@ onMounted(async () => {
 
 <template>
   <div class="container" v-loading="loading">
-    <el-button text @click="router.push('/bundles')">← 返回问卷组合</el-button>
+    <PageCrumbs
+      :items="[
+        { label: '问卷组合', to: '/bundles' },
+        { label: bundleId ? form.title || '编辑组合' : '新建组合' },
+      ]"
+    />
 
     <div class="header">
       <h2>{{ bundleId ? "编辑问卷组合" : "新建问卷组合" }}</h2>
@@ -333,19 +339,19 @@ onMounted(async () => {
 
 <style scoped>
 .container {
-  max-width: 820px;
-  margin: 20px auto;
-  padding: 24px;
+  max-width: 880px;
+  margin: 0 auto;
+  padding-bottom: 24px;
 }
 .header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin: 16px 0;
+  margin: 0 0 16px;
 }
 .header h2 {
   margin: 0;
-  font-size: 20px;
+  font-size: 22px;
   color: #3d2b12;
 }
 .gap {

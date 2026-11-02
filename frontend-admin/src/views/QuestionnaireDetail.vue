@@ -1,59 +1,30 @@
 <script setup>
-import { ref, computed, onMounted } from "vue";
-import { ArrowLeft } from "@element-plus/icons-vue";
+// 问卷「概览」：几个关键数字、题目列表、回答记录（点「详情」看某个人的作答）。
+// 问卷标题、设置、生成链接、导出、删除在外框（QuestionnaireShell.vue）里。
+import { ref, computed, inject, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
+import { Edit, Upload, Plus } from "@element-plus/icons-vue";
 import { API_BASE } from "../api.js";
 
 const route = useRoute();
 const router = useRouter();
 const questionnaireId = route.params.id;
+const shell = inject("questionnaireShell");
+const questionnaire = computed(() => shell.questionnaire.value);
+const questions = computed(() => shell.questions.value);
+
 const showAnswerDialog = ref(false);
 const answerDetail = ref(null);
 const answerLoading = ref(false);
-const questionnaire = ref(null);
-const questions = ref([]);
 const submissions = ref([]);
-const loading = ref(true);
+const submissionsLoaded = ref(false);
 const submissionsLoading = ref(false);
-const exporting = ref(false);
-const showEditDialog = ref(false);
-const saving = ref(false);
-const activeTab = ref("questions"); // questions 或 submissions
+const activeTab = ref(
+  route.query.tab === "submissions" ? "submissions" : "questions",
+);
 const reportDetail = ref(null);
 const subjectInfoDetail = ref([]);
-
-const editForm = ref({
-  title: "",
-  description: "",
-  consent_text: "",
-  track_timing: true,
-});
-
-async function fetchDetail() {
-  const token = localStorage.getItem("admin_token");
-  try {
-    const response = await fetch(
-      `${API_BASE}/api/questionnaires/${questionnaireId}`,
-      {
-        headers: { Authorization: `Bearer ${token}` },
-      },
-    );
-    const data = await response.json();
-    if (data.success) {
-      questionnaire.value = data.questionnaire;
-      questions.value = data.questions;
-    } else {
-      ElMessage.error(data.message);
-      router.push("/");
-    }
-  } catch (err) {
-    console.error("获取问卷详情失败:", err);
-  } finally {
-    loading.value = false;
-  }
-}
-
 const hasDimensions = ref(false);
 
 async function fetchSubmissions() {
@@ -68,6 +39,7 @@ async function fetchSubmissions() {
     if (data.success) {
       submissions.value = data.submissions;
       hasDimensions.value = data.has_dimensions;
+      submissionsLoaded.value = true;
     }
   } catch (err) {
     console.error("获取提交记录失败:", err);
@@ -77,27 +49,15 @@ async function fetchSubmissions() {
 }
 
 function handleTabChange(tab) {
-  if (tab === "submissions" && submissions.value.length === 0) {
-    fetchSubmissions();
-  }
+  router.replace({ query: tab === "submissions" ? { tab } : {} });
+  if (tab === "submissions" && !submissionsLoaded.value) fetchSubmissions();
 }
 
-function openEditDialog() {
-  editForm.value = {
-    title: questionnaire.value.title,
-    description: questionnaire.value.description || "",
-    consent_text: questionnaire.value.consent_text || "",
-    track_timing: !!questionnaire.value.track_timing,
-    is_active: questionnaire.value.is_active !== false,
-    max_responses: questionnaire.value.max_responses || null,
-    expires_at: questionnaire.value.expires_at || null,
-    show_report_chart: !!questionnaire.value.show_report_chart,
-    answer_mode: questionnaire.value.answer_mode || "click",
-    key_practice: questionnaire.value.key_practice ?? 3,
-    key_confidence: !!questionnaire.value.key_confidence,
-  };
-  showEditDialog.value = true;
-}
+onMounted(() => {
+  // 从别的标签页（如「题目」）切回来时刷新一下题目和份数；第一次打开时外框已经在加载了
+  if (shell.questionnaire.value) shell.reload();
+  if (activeTab.value === "submissions") fetchSubmissions();
+});
 
 async function viewAnswers(submissionId) {
   subjectInfoDetail.value = [];
@@ -134,65 +94,35 @@ async function viewAnswers(submissionId) {
   }
 }
 
-async function saveEdit() {
-  if (!editForm.value.title) {
-    ElMessage.warning("问卷标题不能为空");
-    return;
-  }
-  saving.value = true;
-  const token = localStorage.getItem("admin_token");
-  try {
-    const response = await fetch(
-      `${API_BASE}/api/questionnaires/${questionnaireId}`,
-      {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify(editForm.value),
-      },
-    );
-    const data = await response.json();
-    if (data.success) {
-      ElMessage.success("保存成功");
-      showEditDialog.value = false;
-      fetchDetail();
-    } else {
-      ElMessage.error(data.message);
-    }
-  } catch (err) {
-    ElMessage.error("保存失败，请检查后端服务");
-  } finally {
-    saving.value = false;
-  }
+// ---------- 顶部几个数字 ----------
+const typeCounts = computed(() => {
+  const counts = {};
+  questions.value.forEach((q) => {
+    const t = typeLabel(q.question_type);
+    counts[t] = (counts[t] || 0) + 1;
+  });
+  return Object.entries(counts)
+    .map(([t, n]) => `${t} ${n}`)
+    .join(" · ");
+});
+
+function fmtDate(t, withTime = true) {
+  if (!t) return "";
+  const d = new Date(t);
+  const pad = (n) => String(n).padStart(2, "0");
+  const day = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  return withTime ? `${day} ${pad(d.getHours())}:${pad(d.getMinutes())}` : day;
 }
 
-async function exportData() {
-  exporting.value = true;
-  const token = localStorage.getItem("admin_token");
-  try {
-    const response = await fetch(
-      `${API_BASE}/api/questionnaires/${questionnaireId}/export`,
-      { headers: { Authorization: `Bearer ${token}` } },
-    );
-    if (!response.ok) {
-      ElMessage.error("导出失败，请检查是否有作答数据");
-      return;
-    }
-    const blob = await response.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${questionnaire.value.title}_作答数据.xlsx`;
-    a.click();
-    URL.revokeObjectURL(url);
-    ElMessage.success("导出成功");
-  } catch (err) {
-    ElMessage.error("导出失败，请检查后端服务");
-  } finally {
-    exporting.value = false;
-  }
+// 最近提交：今天的显示「今天 14:05」，其他显示日期
+function fmtRecent(t) {
+  if (!t) return "还没有";
+  const d = new Date(t);
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  if (d.toDateString() === now.toDateString())
+    return `今天 ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return fmtDate(t, false);
 }
 
 // 作答详情里有没有按键作答的数据（有才显示那几列）
@@ -301,429 +231,306 @@ function normText(n) {
   if (!n) return "";
   return `T = ${n.t}，约高于常模中 ${n.percentile}% 的人（常模 ${n.mean} ± ${n.sd}）`;
 }
-
-function goImport() {
-  router.push(`/import?qid=${questionnaireId}`);
-}
-function backToList() {
-  router.push("/");
-}
-
-onMounted(fetchDetail);
 </script>
 
 <template>
-  <div class="container" v-loading="loading">
-    <!-- 顶部导航栏 -->
-    <div class="page-nav">
-      <el-button @click="backToList" :icon="ArrowLeft" round size="small"
-        >问卷列表</el-button
-      >
-    </div>
-
+  <div class="overview">
     <template v-if="questionnaire">
-      <!-- 标题区域 -->
-      <div class="page-header">
-        <div class="title-section">
-          <h2 class="page-title">{{ questionnaire.title }}</h2>
-          <p class="page-desc">{{ questionnaire.description || "暂无说明" }}</p>
+      <!-- 关键数字 -->
+      <div class="tiles">
+        <div class="tile">
+          <div class="tile-label">题目</div>
+          <div class="tile-value">{{ questions.length }}<small> 道</small></div>
+          <div class="tile-sub">{{ typeCounts || "还没有题目" }}</div>
         </div>
-        <div class="action-section">
-          <el-button size="small" plain @click="openEditDialog">
-            <span>编辑问卷</span>
-          </el-button>
-          <el-button
-            size="small"
-            plain
-            @click="
-              router.push(`/questionnaire/${questionnaireId}/info-fields`)
-            "
-          >
-            <span>基本信息</span>
-          </el-button>
-          <el-button
-            size="small"
-            plain
-            @click="
-              router.push(`/questionnaire/${questionnaireId}/score-rules`)
-            "
-          >
-            <span>分数段报告</span>
-          </el-button>
-          <el-button
-            size="small"
-            plain
-            @click="router.push(`/questionnaire/${questionnaireId}/dimensions`)"
-          >
-            <span>配置维度</span>
-          </el-button>
-          <el-button
-            size="small"
-            plain
-            @click="router.push(`/questionnaire/${questionnaireId}/norms`)"
-          >
-            <span>常模</span>
-          </el-button>
-          <el-divider direction="vertical" />
-          <el-button
-            size="small"
-            type="warning"
-            plain
-            @click="
-              router.push(`/questionnaire/${questionnaireId}/edit-questions`)
-            "
-          >
-            <span>编辑题目</span>
-          </el-button>
-          <el-button
-            size="small"
-            type="info"
-            plain
-            @click="router.push(`/import?qid=${questionnaireId}`)"
-          >
-            <span>导入题目</span>
-          </el-button>
-          <el-button
-            size="small"
-            type="primary"
-            plain
-            @click="router.push(`/questionnaire/${questionnaireId}/stats`)"
-          >
-            <span>统计分析</span>
-          </el-button>
-          <el-button
-            size="small"
-            type="success"
-            @click="exportData"
-            :loading="exporting"
-          >
-            <span>导出数据</span>
-          </el-button>
+        <div class="tile">
+          <div class="tile-label">收到答卷</div>
+          <div class="tile-value">
+            {{ questionnaire.submission_count ?? 0 }}<small> 份</small>
+          </div>
+          <div class="tile-sub">
+            {{
+              questionnaire.max_responses
+                ? `最多收 ${questionnaire.max_responses} 份`
+                : "不限份数"
+            }}
+          </div>
+        </div>
+        <div class="tile">
+          <div class="tile-label">最近提交</div>
+          <div class="tile-value text">
+            {{ fmtRecent(questionnaire.last_submitted_at) }}
+          </div>
+          <div class="tile-sub">
+            {{
+              questionnaire.expires_at
+                ? `截止 ${fmtDate(questionnaire.expires_at)}`
+                : "没有截止时间"
+            }}
+          </div>
+        </div>
+        <div class="tile">
+          <div class="tile-label">创建</div>
+          <div class="tile-value text">
+            {{ questionnaire.creator_name || "未知" }}
+          </div>
+          <div class="tile-sub">
+            {{ fmtDate(questionnaire.created_at, false) }} ·
+            {{ questionnaire.track_timing ? "记录每题用时" : "不记录用时" }}
+          </div>
         </div>
       </div>
 
-      <div class="meta">
-        <el-tag size="small"
-          >创建人：{{ questionnaire.creator_name || "未知" }}</el-tag
-        >
-        <el-tag
-          size="small"
-          :type="questionnaire.track_timing ? 'success' : 'info'"
-        >
-          {{ questionnaire.track_timing ? "已开启时长记录" : "未开启时长记录" }}
-        </el-tag>
-        <el-tag size="small" type="info">共 {{ questions.length }} 道题</el-tag>
-        <el-tag
-          v-if="questionnaire.answer_mode === 'key'"
-          size="small"
-          type="warning"
-          >按键作答{{
-            questionnaire.key_confidence ? " · 问把握程度" : ""
-          }}</el-tag
-        >
+      <div v-if="questionnaire.description" class="desc">
+        {{ questionnaire.description }}
       </div>
 
-      <el-tabs
-        v-model="activeTab"
-        style="margin-top: 24px"
-        @tab-change="handleTabChange"
-      >
-        <el-tab-pane label="题目列表" name="questions">
-          <el-table :data="questions" v-if="questions.length > 0">
-            <el-table-column prop="order_num" label="序号" width="70" />
-            <el-table-column label="题目内容" min-width="180">
-              <template #default="scope">
-                {{ scope.row.content }}
-                <el-tag
-                  v-if="hasMedia(scope.row)"
-                  size="small"
-                  type="success"
-                  style="margin-left: 4px"
-                  >🖼 有图片/视频</el-tag
-                >
-              </template>
-            </el-table-column>
-            <el-table-column label="题型" width="100">
-              <template #default="scope">
-                <el-tag size="small" type="primary">
-                  {{ typeLabel(scope.row.question_type) }}
-                </el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="填写角色" width="90">
-              <template #default="scope">
-                <el-tag size="small" :type="roleTagType(scope.row.role)">
-                  {{ roleLabel(scope.row.role) }}
-                </el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="选项/分值" min-width="160">
-              <template #default="scope">
-                <span
-                  v-if="
-                    scope.row.question_type === 'scale' ||
-                    !scope.row.question_type
-                  "
-                >
-                  {{ scope.row.min_score }} - {{ scope.row.max_score }} 分
+      <!-- 题目列表 / 回答记录 -->
+      <div class="panel">
+        <el-tabs v-model="activeTab" @tab-change="handleTabChange">
+          <el-tab-pane name="questions">
+            <template #label>
+              题目列表
+              <span class="tab-count">{{ questions.length }}</span>
+            </template>
+            <div class="panel-tools" v-if="questions.length > 0">
+              <span class="muted"
+                >只读预览，修改题目、调整顺序、设置题目逻辑请到「题目」页</span
+              >
+              <el-button
+                size="small"
+                type="primary"
+                plain
+                :icon="Edit"
+                @click="
+                  router.push(
+                    `/questionnaire/${questionnaireId}/edit-questions`,
+                  )
+                "
+                >编辑题目</el-button
+              >
+            </div>
+            <el-table :data="questions" v-if="questions.length > 0">
+              <el-table-column prop="order_num" label="序号" width="70" />
+              <el-table-column label="题目内容" min-width="180">
+                <template #default="scope">
+                  {{ scope.row.content }}
                   <el-tag
-                    v-if="scope.row.is_reverse_scored"
+                    v-if="hasMedia(scope.row)"
                     size="small"
-                    type="warning"
+                    type="success"
                     style="margin-left: 4px"
-                    >反向</el-tag
+                    >有图片/视频</el-tag
                   >
-                  <div
-                    v-if="formatOptions(scope.row.options)"
-                    style="font-size: 12px; color: #666"
-                  >
-                    {{ formatOptions(scope.row.options) }}
-                  </div>
-                </span>
-                <span
-                  v-else-if="scope.row.question_type === 'yes_no'"
-                  style="color: #999; font-size: 12px"
-                >
-                  是 / 否
-                </span>
-                <span
-                  v-else-if="scope.row.question_type === 'open_text'"
-                  style="color: #999; font-size: 12px"
-                >
-                  文字输入
-                </span>
-                <span
-                  v-else-if="
-                    ['single_choice', 'multiple_choice'].includes(
-                      scope.row.question_type,
-                    ) && scope.row.options
-                  "
-                >
-                  <span style="font-size: 12px; color: #666">
-                    {{ formatOptions(scope.row.options) }}
-                  </span>
-                </span>
-                <span v-else style="color: #ccc; font-size: 12px">—</span>
-              </template>
-            </el-table-column>
-          </el-table>
-          <el-empty v-else description="还没有题目，点击右上角导入题目" />
-        </el-tab-pane>
-
-        <el-tab-pane name="submissions">
-          <template #label>
-            回答记录
-            <el-badge
-              v-if="submissions.length > 0"
-              :value="submissions.length"
-              style="margin-left: 4px"
-            />
-          </template>
-
-          <div v-loading="submissionsLoading">
-            <el-table :data="submissions" v-if="submissions.length > 0">
-              <el-table-column label="编号" width="90">
-                <template #default="scope">
-                  {{ scope.row.id }}
-                  <el-tooltip
-                    v-if="scope.row.bundle_id"
-                    content="通过问卷组合链接作答"
-                    placement="top"
-                  >
-                    <el-tag size="small" type="info">组合</el-tag>
-                  </el-tooltip>
                 </template>
               </el-table-column>
-              <el-table-column label="分组" width="100">
+              <el-table-column label="题型" width="90">
                 <template #default="scope">
-                  <el-tag
-                    v-if="scope.row.group_label"
-                    size="small"
-                    type="primary"
-                  >
-                    {{ scope.row.group_label }}
-                  </el-tag>
-                  <span v-else style="color: #ccc; font-size: 12px">无</span>
-                </template>
-              </el-table-column>
-              <el-table-column label="提交时间" width="170">
-                <template #default="scope">
-                  {{ formatTime(scope.row.finished_at) }}
-                </template>
-              </el-table-column>
-              <el-table-column label="总用时" width="100">
-                <template #default="scope">
-                  {{ formatDuration(scope.row.duration_seconds) }}
-                </template>
-              </el-table-column>
-              <el-table-column label="状态" width="80">
-                <template #default="scope">
-                  <el-tooltip
-                    v-if="scope.row.is_invalid"
-                    content="答到了跳题逻辑里「直接提交为无效答卷」的选项，不计入统计"
-                    placement="top"
-                  >
-                    <el-tag type="danger" size="small">无效</el-tag>
-                  </el-tooltip>
-                  <el-tag
-                    v-else
-                    :type="isComplete(scope.row) ? 'success' : 'warning'"
-                    size="small"
-                  >
-                    {{ isComplete(scope.row) ? "完整" : "部分" }}
+                  <el-tag size="small" type="primary" effect="plain">
+                    {{ typeLabel(scope.row.question_type) }}
                   </el-tag>
                 </template>
               </el-table-column>
-
-              <el-table-column label="查看" width="90">
+              <el-table-column label="填写角色" width="90">
                 <template #default="scope">
-                  <el-button size="small" @click="viewAnswers(scope.row.id)"
-                    >详情</el-button
-                  >
+                  <el-tag size="small" :type="roleTagType(scope.row.role)">
+                    {{ roleLabel(scope.row.role) }}
+                  </el-tag>
                 </template>
               </el-table-column>
-
-              <!-- 有维度配置时显示总分和各维度得分 -->
-              <template v-if="hasDimensions">
-                <el-table-column label="总分" width="80">
-                  <template #default="scope">
-                    <span style="font-weight: 600; color: #3d2b12">
-                      {{ scope.row.total_score ?? "-" }}
-                    </span>
-                  </template>
-                </el-table-column>
-                <el-table-column label="各维度得分" min-width="200">
-                  <template #default="scope">
-                    <div class="dim-scores">
-                      <el-tag
-                        v-for="ds in scope.row.dimension_scores"
-                        :key="ds.name"
-                        size="small"
-                        type="info"
-                        style="margin: 2px"
-                      >
-                        {{ ds.name }}：{{ ds.score ?? "-" }}
-                      </el-tag>
+              <el-table-column label="选项/分值" min-width="160">
+                <template #default="scope">
+                  <span
+                    v-if="
+                      scope.row.question_type === 'scale' ||
+                      !scope.row.question_type
+                    "
+                  >
+                    {{ scope.row.min_score }} - {{ scope.row.max_score }} 分
+                    <el-tag
+                      v-if="scope.row.is_reverse_scored"
+                      size="small"
+                      type="warning"
+                      style="margin-left: 4px"
+                      >反向</el-tag
+                    >
+                    <div
+                      v-if="formatOptions(scope.row.options)"
+                      class="opt-text"
+                    >
+                      {{ formatOptions(scope.row.options) }}
                     </div>
+                  </span>
+                  <span
+                    v-else-if="scope.row.question_type === 'yes_no'"
+                    class="opt-text"
+                    >是 / 否</span
+                  >
+                  <span
+                    v-else-if="scope.row.question_type === 'open_text'"
+                    class="opt-text"
+                    >文字输入</span
+                  >
+                  <span
+                    v-else-if="
+                      ['single_choice', 'multiple_choice'].includes(
+                        scope.row.question_type,
+                      ) && scope.row.options
+                    "
+                    class="opt-text"
+                    >{{ formatOptions(scope.row.options) }}</span
+                  >
+                  <span v-else style="color: #ccc; font-size: 12px">—</span>
+                </template>
+              </el-table-column>
+            </el-table>
+            <div v-else class="empty">
+              <div class="empty-title">还没有题目</div>
+              <div class="empty-sub">
+                可以一道一道添加，也可以用 Excel 模板一次导入
+              </div>
+              <div class="empty-actions">
+                <el-button
+                  type="primary"
+                  :icon="Plus"
+                  @click="
+                    router.push(
+                      `/questionnaire/${questionnaireId}/edit-questions`,
+                    )
+                  "
+                  >添加题目</el-button
+                >
+                <el-button
+                  :icon="Upload"
+                  @click="router.push(`/import?qid=${questionnaireId}`)"
+                  >从 Excel 导入</el-button
+                >
+              </div>
+            </div>
+          </el-tab-pane>
+
+          <el-tab-pane name="submissions">
+            <template #label>
+              回答记录
+              <span class="tab-count">{{
+                submissionsLoaded
+                  ? submissions.length
+                  : (questionnaire.submission_count ?? 0)
+              }}</span>
+            </template>
+
+            <div v-loading="submissionsLoading">
+              <el-table :data="submissions" v-if="submissions.length > 0">
+                <el-table-column label="编号" width="90">
+                  <template #default="scope">
+                    {{ scope.row.id }}
+                    <el-tooltip
+                      v-if="scope.row.bundle_id"
+                      content="通过问卷组合链接作答"
+                      placement="top"
+                    >
+                      <el-tag size="small" type="info">组合</el-tag>
+                    </el-tooltip>
                   </template>
                 </el-table-column>
-              </template>
+                <el-table-column label="分组" width="100">
+                  <template #default="scope">
+                    <el-tag
+                      v-if="scope.row.group_label"
+                      size="small"
+                      type="primary"
+                      effect="plain"
+                    >
+                      {{ scope.row.group_label }}
+                    </el-tag>
+                    <span v-else style="color: #ccc; font-size: 12px">无</span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="提交时间" width="170">
+                  <template #default="scope">
+                    {{ formatTime(scope.row.finished_at) }}
+                  </template>
+                </el-table-column>
+                <el-table-column label="总用时" width="100">
+                  <template #default="scope">
+                    {{ formatDuration(scope.row.duration_seconds) }}
+                  </template>
+                </el-table-column>
+                <el-table-column label="状态" width="80">
+                  <template #default="scope">
+                    <el-tooltip
+                      v-if="scope.row.is_invalid"
+                      content="答到了跳题逻辑里「直接提交为无效答卷」的选项，不计入统计"
+                      placement="top"
+                    >
+                      <el-tag type="danger" size="small">无效</el-tag>
+                    </el-tooltip>
+                    <el-tag
+                      v-else
+                      :type="isComplete(scope.row) ? 'success' : 'warning'"
+                      size="small"
+                    >
+                      {{ isComplete(scope.row) ? "完整" : "部分" }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
 
-              <template v-else>
-                <el-table-column label="得分" width="180">
-                  <template #default>
-                    <span style="color: #aaa; font-size: 12px"
-                      >请先配置维度计分规则</span
+                <el-table-column label="查看" width="90">
+                  <template #default="scope">
+                    <el-button size="small" @click="viewAnswers(scope.row.id)"
+                      >详情</el-button
                     >
                   </template>
                 </el-table-column>
-              </template>
-            </el-table>
-            <el-empty
-              v-else-if="!submissionsLoading"
-              description="还没有人提交这份问卷"
-            />
-          </div>
-        </el-tab-pane>
-      </el-tabs>
-    </template>
 
-    <el-dialog v-model="showEditDialog" title="编辑问卷" width="560px">
-      <el-form :model="editForm" label-width="90px">
-        <el-form-item label="问卷标题">
-          <el-input v-model="editForm.title" />
-        </el-form-item>
-        <el-form-item label="问卷说明">
-          <el-input v-model="editForm.description" type="textarea" :rows="2" />
-        </el-form-item>
-        <el-form-item label="知情同意">
-          <el-input
-            v-model="editForm.consent_text"
-            type="textarea"
-            :rows="4"
-            placeholder="受测者答题前会看到这段说明"
-          />
-        </el-form-item>
-        <el-form-item label="记录时长">
-          <el-switch v-model="editForm.track_timing" />
-        </el-form-item>
-        <el-form-item label="结果图表">
-          <el-switch
-            v-model="editForm.show_report_chart"
-            active-text="答完后给受测者看维度得分图"
-          />
-          <div style="font-size: 12px; color: #999; line-height: 1.6">
-            显示每个维度的得分、所有人的平均分和对应说明（需要先配置维度）。
-          </div>
-        </el-form-item>
-        <el-divider>答题方式</el-divider>
-        <el-form-item label="作答方式">
-          <el-radio-group v-model="editForm.answer_mode">
-            <el-radio value="click">点击作答</el-radio>
-            <el-radio value="key">按键作答（记录按键时长）</el-radio>
-          </el-radio-group>
-          <div class="form-tip">
-            按键作答：电脑上用键盘字母键 A、B、C…
-            作答，记录「题目出现→按下」和「按下→松开」的毫秒数；手机上记录手指按下到抬起的时间。适用于量表、单选、是否题，多选和开放题照常作答。生成链接时也可以单独指定。
-          </div>
-        </el-form-item>
-        <template v-if="editForm.answer_mode === 'key'">
-          <el-form-item label="练习题">
-            <el-input-number
-              v-model="editForm.key_practice"
-              :min="0"
-              :max="5"
-              controls-position="right"
-              style="width: 110px"
-            />
-            <span class="form-tip-inline">道，正式作答前熟悉按键，不保存</span>
-          </el-form-item>
-          <el-form-item label="把握程度">
-            <el-switch
-              v-model="editForm.key_confidence"
-              active-text="每题答完后问一次把握程度（1-5）"
-            />
-          </el-form-item>
-        </template>
-        <el-divider>回收控制</el-divider>
-        <el-form-item label="问卷状态">
-          <el-switch
-            v-model="editForm.is_active"
-            active-text="开放填写"
-            inactive-text="已关闭"
-          />
-        </el-form-item>
-        <el-form-item label="最大回收数">
-          <el-input-number
-            v-model="editForm.max_responses"
-            :min="1"
-            :max="99999"
-            placeholder="不填表示不限制"
-            controls-position="right"
-            style="width: 180px"
-          />
-          <span style="margin-left: 8px; font-size: 12px; color: #999"
-            >份，不填表示不限制</span
-          >
-        </el-form-item>
-        <el-form-item label="截止时间">
-          <el-date-picker
-            v-model="editForm.expires_at"
-            type="datetime"
-            placeholder="不选表示不限制"
-            format="YYYY-MM-DD HH:mm"
-            value-format="YYYY-MM-DD HH:mm:ss"
-            style="width: 220px"
-          />
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="showEditDialog = false">取消</el-button>
-        <el-button type="primary" @click="saveEdit" :loading="saving"
-          >保存</el-button
-        >
-      </template>
-    </el-dialog>
+                <!-- 有维度配置时显示总分和各维度得分 -->
+                <template v-if="hasDimensions">
+                  <el-table-column label="总分" width="80">
+                    <template #default="scope">
+                      <span style="font-weight: 600; color: #3d2b12">
+                        {{ scope.row.total_score ?? "-" }}
+                      </span>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="各维度得分" min-width="200">
+                    <template #default="scope">
+                      <div class="dim-scores">
+                        <el-tag
+                          v-for="ds in scope.row.dimension_scores"
+                          :key="ds.name"
+                          size="small"
+                          type="info"
+                          style="margin: 2px"
+                        >
+                          {{ ds.name }}：{{ ds.score ?? "-" }}
+                        </el-tag>
+                      </div>
+                    </template>
+                  </el-table-column>
+                </template>
+
+                <template v-else>
+                  <el-table-column label="得分" min-width="180">
+                    <template #default>
+                      <span style="color: #aaa; font-size: 12px"
+                        >在「维度计分」里配置后显示得分</span
+                      >
+                    </template>
+                  </el-table-column>
+                </template>
+              </el-table>
+              <div v-else-if="!submissionsLoading" class="empty">
+                <div class="empty-title">还没有人提交这份问卷</div>
+                <div class="empty-sub">
+                  点右上角「生成链接」，把链接或二维码发给受测者
+                </div>
+              </div>
+            </div>
+          </el-tab-pane>
+        </el-tabs>
+      </div>
+    </template>
+    <div v-else class="loading-box" v-loading="true"></div>
 
     <!-- 答案详情弹窗 -->
     <el-dialog v-model="showAnswerDialog" title="作答详情" width="600px">
@@ -954,6 +761,113 @@ onMounted(fetchDetail);
 </template>
 
 <style scoped>
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+}
+.tile {
+  background: var(--app-card);
+  border: 1px solid var(--app-border);
+  border-radius: 12px;
+  padding: 14px 16px;
+}
+.tile-label {
+  font-size: 12px;
+  color: var(--app-text-3);
+}
+.tile-value {
+  margin-top: 4px;
+  font-size: 26px;
+  font-weight: 650;
+  color: var(--app-text);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.25;
+}
+.tile-value small {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--app-text-3);
+}
+.tile-value.text {
+  font-size: 17px;
+  padding: 5px 0 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tile-sub {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--app-text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.desc {
+  margin-top: 12px;
+  padding: 10px 14px;
+  background: var(--app-accent-soft);
+  border-radius: 10px;
+  font-size: 13px;
+  color: var(--app-text-2);
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+.panel {
+  margin-top: 16px;
+  background: var(--app-card);
+  border: 1px solid var(--app-border);
+  border-radius: 12px;
+  padding: 4px 18px 16px;
+}
+.tab-count {
+  display: inline-block;
+  margin-left: 6px;
+  min-width: 20px;
+  padding: 0 6px;
+  border-radius: 10px;
+  background: #f3ede3;
+  color: var(--app-text-2);
+  font-size: 12px;
+  line-height: 18px;
+  text-align: center;
+}
+.panel-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.muted {
+  font-size: 12px;
+  color: var(--app-text-3);
+}
+.opt-text {
+  font-size: 12px;
+  color: #777;
+}
+.empty {
+  text-align: center;
+  padding: 40px 0 32px;
+}
+.empty-title {
+  font-size: 15px;
+  color: var(--app-text);
+  font-weight: 600;
+}
+.empty-sub {
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--app-text-3);
+}
+.empty-actions {
+  margin-top: 16px;
+}
+.loading-box {
+  height: 240px;
+}
 .dim-report-list {
   margin: 10px 0;
   display: flex;
@@ -996,14 +910,6 @@ onMounted(fetchDetail);
   line-height: 1.6;
   margin-top: 4px;
 }
-.action-section .el-button {
-  margin: 0;
-}
-.action-section .el-divider--vertical {
-  height: 24px;
-  margin: 0 4px;
-}
-
 .info-section {
   margin: 12px 0;
   padding: 12px;
@@ -1059,7 +965,6 @@ onMounted(fetchDetail);
   margin-top: 8px;
   border-left: 3px solid #4caf7d;
 }
-
 .answer-meta {
   display: flex;
   flex-wrap: wrap;
@@ -1069,7 +974,6 @@ onMounted(fetchDetail);
   padding: 8px 0;
   border-bottom: 1px solid #f0f0f0;
 }
-
 .report-block {
   margin: 12px 0;
   padding: 12px 16px;
@@ -1088,11 +992,6 @@ onMounted(fetchDetail);
   gap: 8px;
   margin-bottom: 6px;
 }
-.label-text {
-  font-size: 15px;
-  font-weight: 600;
-  color: #2e4a38;
-}
 .report-desc {
   font-size: 13px;
   color: #5a7a64;
@@ -1104,71 +1003,6 @@ onMounted(fetchDetail);
   border-left-color: #ddd;
   background: #fafafa;
 }
-.admin-only .label-text {
-  color: #8b5a2b;
-}
-
-.header h2 {
-  margin: 0 0 4px;
-  font-size: 20px;
-  color: #3d2b12;
-}
-
-.container {
-  max-width: 960px;
-  margin: 0 auto;
-  padding: 16px 24px 24px;
-}
-.page-nav {
-  margin-bottom: 16px;
-}
-.page-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 16px 20px;
-  background: #fff;
-  border-radius: 12px;
-  border: 1px solid #f0dcae;
-  margin-bottom: 20px;
-}
-.title-section {
-  flex: 1;
-  min-width: 0;
-}
-.page-title {
-  font-size: 18px;
-  font-weight: 600;
-  color: #3d2b12;
-  margin: 0 0 4px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.page-desc {
-  font-size: 13px;
-  color: #999;
-  margin: 0 0 10px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.meta {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-.action-section {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-shrink: 0;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  max-width: 520px;
-}
-
 .dim-scores {
   display: flex;
   flex-wrap: wrap;
@@ -1199,16 +1033,5 @@ onMounted(fetchDetail);
   display: inline-block;
   min-width: 110px;
   color: #2f5d8a;
-}
-.form-tip {
-  font-size: 12px;
-  color: #999;
-  line-height: 1.6;
-  width: 100%;
-}
-.form-tip-inline {
-  margin-left: 8px;
-  font-size: 12px;
-  color: #999;
 }
 </style>

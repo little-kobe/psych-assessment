@@ -14,6 +14,7 @@ const crypto = require("crypto");
 const statsMath = require("./stats-math");
 const video = require("./video");
 const questionLogic = require("./logic"); // 题目关联、跳题逻辑、选项关联
+const keyStats = require("./key-stats"); // 按键作答的统计（按住时长、把握程度）
 
 // 配置：上线时写在 backend/.env 文件里（数据库密码、JWT 密钥等），本地没有这个文件就用下面的默认值
 const ENV_FILE = path.join(__dirname, ".env");
@@ -1492,7 +1493,9 @@ app.get("/api/questionnaires", verifyAdminToken, async (req, res) => {
       // 导师：查所有问卷，顺带查出创建者姓名方便前端展示
       sql = `
         SELECT q.*, a.display_name AS creator_name,
-          (SELECT COUNT(*) FROM questions WHERE questionnaire_id = q.id) AS question_count
+          (SELECT COUNT(*) FROM questions WHERE questionnaire_id = q.id) AS question_count,
+          (SELECT COUNT(*) FROM submissions WHERE questionnaire_id = q.id) AS submission_count,
+          (SELECT MAX(finished_at) FROM submissions WHERE questionnaire_id = q.id) AS last_submitted_at
         FROM questionnaires q
         LEFT JOIN admins a ON q.created_by = a.id
         ORDER BY q.created_at DESC
@@ -1502,7 +1505,9 @@ app.get("/api/questionnaires", verifyAdminToken, async (req, res) => {
       // 普通研究者：只查自己创建的
       sql = `
         SELECT q.*, a.display_name AS creator_name,
-          (SELECT COUNT(*) FROM questions WHERE questionnaire_id = q.id) AS question_count
+          (SELECT COUNT(*) FROM questions WHERE questionnaire_id = q.id) AS question_count,
+          (SELECT COUNT(*) FROM submissions WHERE questionnaire_id = q.id) AS submission_count,
+          (SELECT MAX(finished_at) FROM submissions WHERE questionnaire_id = q.id) AS last_submitted_at
         FROM questionnaires q
         LEFT JOIN admins a ON q.created_by = a.id
         WHERE q.created_by = ?
@@ -1560,7 +1565,10 @@ app.get("/api/questionnaires/:id", verifyAdminToken, async (req, res) => {
     const connection = await mysql.createConnection(dbConfig);
 
     const [qRows] = await connection.execute(
-      "SELECT q.*, a.display_name AS creator_name FROM questionnaires q LEFT JOIN admins a ON q.created_by = a.id WHERE q.id = ?",
+      `SELECT q.*, a.display_name AS creator_name,
+         (SELECT COUNT(*) FROM submissions WHERE questionnaire_id = q.id) AS submission_count,
+         (SELECT MAX(finished_at) FROM submissions WHERE questionnaire_id = q.id) AS last_submitted_at
+       FROM questionnaires q LEFT JOIN admins a ON q.created_by = a.id WHERE q.id = ?`,
       [questionnaireId],
     );
 
@@ -1713,6 +1721,17 @@ app.get(
         answerMap[ans.submission_id][ans.question_id] = ans;
       });
 
+      // 按键作答的每人汇总（按住时长中位数等），没有按键题次的答卷为 null
+      const keySummaryCache = {};
+      const keySummaryOf = (sub) => {
+        if (!(sub.id in keySummaryCache)) {
+          keySummaryCache[sub.id] = keyStats.personSummary(
+            Object.values(answerMap[sub.id] || {}),
+          );
+        }
+        return keySummaryCache[sub.id];
+      };
+
       // 创建Excel
       const workbook = new ExcelJS.Workbook();
       const sheet = workbook.addWorksheet("作答数据");
@@ -1731,7 +1750,7 @@ app.get(
         "追踪码",
         "分组",
         ...(hasInvalid ? ["答卷状态"] : []),
-        ...(hasKey ? ["答题方式"] : []),
+        ...(hasKey ? ["答题方式", "作答输入"] : []),
         ...infoHeaders,
         "开始时间",
         "完成时间",
@@ -1827,7 +1846,12 @@ app.get(
           sub.tracking_code || "",
           sub.group_label || "",
           ...(hasInvalid ? [sub.is_invalid ? "无效（跳题逻辑）" : "有效"] : []),
-          ...(hasKey ? [sub.answer_mode === "key" ? "按键" : "点击"] : []),
+          ...(hasKey
+            ? [
+                sub.answer_mode === "key" ? "按键" : "点击",
+                keySummaryOf(sub)?.input_label || "",
+              ]
+            : []),
           ...infoCols,
           sub.started_at
             ? new Date(sub.started_at).toLocaleString("zh-CN")
@@ -1912,6 +1936,83 @@ app.get(
         else if (index < fixedColCount + questions.length * 2) col.width = 14;
         else col.width = 16;
       });
+
+      // 按键数据（每人一行）：每份按键答卷的汇总，后面是每道题的按住时长、按下用时（宽格式，SPSS 等直接可用）
+      if (hasKey) {
+        const keySubs = submissions.filter(
+          (sub) => sub.answer_mode === "key" && keySummaryOf(sub),
+        );
+        const keyQuestions = questions.filter((q) =>
+          keySubs.some((sub) => {
+            const a = (answerMap[sub.id] || {})[q.id];
+            return a && a.hold_ms !== null && a.hold_ms !== undefined;
+          }),
+        );
+        const hasConfP = keySubs.some((sub) => keySummaryOf(sub).conf_n > 0);
+        const qName = (q) => `Q${q.order_num}`;
+        const personSheet = workbook.addWorksheet("按键数据（每人一行）");
+        personSheet.addRow([
+          "提交ID",
+          "追踪码",
+          "分组",
+          ...(hasInvalid ? ["答卷状态"] : []),
+          ...infoHeaders,
+          "作答输入",
+          "按键题数",
+          "按住时长_中位数(ms)",
+          "按住时长_平均(ms)",
+          "按住时长_标准差(ms)",
+          "按住时长_最短(ms)",
+          "按住时长_最长(ms)",
+          "按住超过3秒的题数",
+          "按下用时_中位数(ms)",
+          "按下用时_平均(ms)",
+          ...(hasConfP ? ["把握程度_平均", "按住时长与把握_相关r"] : []),
+          "按下用时与按住时长_相关r",
+          ...keyQuestions.map((q) => `${qName(q)}_按住(ms)`),
+          ...keyQuestions.map((q) => `${qName(q)}_按下(ms)`),
+          ...(hasConfP ? keyQuestions.map((q) => `${qName(q)}_把握`) : []),
+        ]);
+        personSheet.getRow(1).font = { bold: true };
+        personSheet.getRow(1).fill = headerRow.fill;
+        keySubs.forEach((sub) => {
+          const sm = keySummaryOf(sub);
+          const subAnswers = answerMap[sub.id] || {};
+          const subInfo = subjectInfoMap[sub.id] || {};
+          const cell = (q, field) => {
+            const a = subAnswers[q.id];
+            return a && a.hold_ms !== null && a.hold_ms !== undefined
+              ? (a[field] ?? "")
+              : "";
+          };
+          const e = (x) => (x === null || x === undefined ? "" : x);
+          personSheet.addRow([
+            sub.id,
+            sub.tracking_code || "",
+            sub.group_label || "",
+            ...(hasInvalid
+              ? [sub.is_invalid ? "无效（跳题逻辑）" : "有效"]
+              : []),
+            ...infoFields.map((f) => subInfo[f.field_key] || ""),
+            sm.input_label,
+            sm.n,
+            e(sm.hold_median),
+            e(sm.hold_mean),
+            e(sm.hold_sd),
+            e(sm.hold_min),
+            e(sm.hold_max),
+            sm.over_3s,
+            e(sm.rt_median),
+            e(sm.rt_mean),
+            ...(hasConfP ? [e(sm.conf_mean), e(sm.r_hold_conf)] : []),
+            e(sm.r_rt_hold),
+            ...keyQuestions.map((q) => cell(q, "hold_ms")),
+            ...keyQuestions.map((q) => cell(q, "rt_ms")),
+            ...(hasConfP ? keyQuestions.map((q) => cell(q, "confidence")) : []),
+          ]);
+        });
+        personSheet.columns.forEach((col) => (col.width = 14));
+      }
 
       // 按键数据：每份答卷的每道题一行（长格式），方便做混合效应模型等逐题分析
       if (hasKey) {
@@ -2049,6 +2150,183 @@ app.get(
     } catch (err) {
       console.error("导出失败:", err);
       res.status(500).json({ success: false, message: "导出失败，请稍后重试" });
+    }
+  },
+);
+
+// ========== 删除问卷 ==========
+// 删除问卷会连同题目、维度、分数段、常模、基本信息字段、板块和所有作答记录一起删掉，不能撤销。
+// 前端先调「删除预览」显示会删掉什么，确认时要输入问卷标题；后端再核对一次标题。
+
+// 题目里用到的上传文件（题干图片视频、选项图片），返回 /uploads/xxx 列表
+function uploadsInQuestions(rows) {
+  const set = new Set();
+  rows.forEach((q) => {
+    [q.media, q.options].forEach((v) => {
+      if (v === null || v === undefined) return;
+      const text = typeof v === "string" ? v : JSON.stringify(v);
+      (text.match(/\/uploads\/[^"'\s\\]+/g) || []).forEach((u) => set.add(u));
+    });
+  });
+  return [...set];
+}
+
+app.get(
+  "/api/questionnaires/:id/delete-preview",
+  verifyAdminToken,
+  requireAccess("questionnaire"),
+  async (req, res) => {
+    const connection = await mysql.createConnection(dbConfig);
+    try {
+      const id = req.params.id;
+      const [qRows] = await connection.execute(
+        "SELECT id, title FROM questionnaires WHERE id = ?",
+        [id],
+      );
+      const [questions] = await connection.execute(
+        "SELECT media, options FROM questions WHERE questionnaire_id = ?",
+        [id],
+      );
+      const [subs] = await connection.execute(
+        "SELECT COUNT(*) AS n FROM submissions WHERE questionnaire_id = ?",
+        [id],
+      );
+      const [bundles] = await connection.execute(
+        `SELECT DISTINCT b.id, b.title FROM bundle_questionnaires bq
+           INNER JOIN bundles b ON bq.bundle_id = b.id
+           WHERE bq.questionnaire_id = ? ORDER BY b.id`,
+        [id],
+      );
+      await connection.end();
+      res.json({
+        success: true,
+        title: qRows[0].title,
+        question_count: questions.length,
+        submission_count: subs[0].n,
+        bundles,
+        media_count: uploadsInQuestions(questions).length,
+      });
+    } catch (err) {
+      await connection.end().catch(() => {});
+      console.error("删除预览失败:", err);
+      res.status(500).json({ success: false, message: "服务器错误" });
+    }
+  },
+);
+
+app.delete(
+  "/api/questionnaires/:id",
+  verifyAdminToken,
+  requireAccess("questionnaire"),
+  async (req, res) => {
+    const id = req.params.id;
+    const connection = await mysql.createConnection(dbConfig);
+    try {
+      const [qRows] = await connection.execute(
+        "SELECT id, title FROM questionnaires WHERE id = ?",
+        [id],
+      );
+      const confirmTitle = String(req.body?.confirm_title ?? "").trim();
+      if (confirmTitle !== String(qRows[0].title).trim()) {
+        await connection.end();
+        return res.status(400).json({
+          success: false,
+          message: "输入的问卷标题不对，没有删除",
+        });
+      }
+      const [questions] = await connection.execute(
+        "SELECT id, media, options FROM questions WHERE questionnaire_id = ?",
+        [id],
+      );
+      const files = uploadsInQuestions(questions);
+
+      await connection.beginTransaction();
+      const subIds = "SELECT id FROM submissions WHERE questionnaire_id = ?";
+      const qIds = "SELECT id FROM questions WHERE questionnaire_id = ?";
+      // 先删作答（答案、基本信息、提交记录），再删问卷的各项设置，最后删问卷本身
+      // MySQL 不允许 DELETE 的子查询直接引用同一张表，所以多包一层
+      await connection.execute(
+        `DELETE FROM answers WHERE submission_id IN (SELECT id FROM (${subIds}) t)
+           OR question_id IN (SELECT id FROM (${qIds}) t2)`,
+        [id, id],
+      );
+      await connection.execute(
+        `DELETE FROM subject_info WHERE submission_id IN (SELECT id FROM (${subIds}) t)`,
+        [id],
+      );
+      await connection.execute(
+        "DELETE FROM submissions WHERE questionnaire_id = ?",
+        [id],
+      );
+      await connection.execute(
+        `DELETE FROM dimension_questions
+           WHERE dimension_id IN (SELECT id FROM (SELECT id FROM dimensions WHERE questionnaire_id = ?) t)
+              OR question_id IN (SELECT id FROM (${qIds}) t2)`,
+        [id, id],
+      );
+      await connection.execute(
+        "DELETE FROM score_rules WHERE questionnaire_id = ?",
+        [id],
+      );
+      await connection.execute(
+        "DELETE FROM dimensions WHERE questionnaire_id = ?",
+        [id],
+      );
+      await connection.execute(
+        "DELETE FROM questions WHERE questionnaire_id = ?",
+        [id],
+      );
+      await connection.execute(
+        "DELETE FROM question_sections WHERE questionnaire_id = ?",
+        [id],
+      );
+      await connection.execute(
+        "DELETE FROM subject_info_fields WHERE questionnaire_id = ?",
+        [id],
+      );
+      await connection.execute("DELETE FROM norms WHERE questionnaire_id = ?", [
+        id,
+      ]);
+      await connection.execute(
+        "DELETE FROM bundle_questionnaires WHERE questionnaire_id = ?",
+        [id],
+      );
+      await connection.execute("DELETE FROM questionnaires WHERE id = ?", [id]);
+      await connection.commit();
+
+      // 上传的图片、视频：别的问卷没有再用到的才删（复制题目时会共用同一个文件）
+      // 问卷已经删掉了，这一步出错只记日志，不影响结果
+      let removedFiles = 0;
+      try {
+        for (const url of files) {
+          const like = `%${url}%`;
+          const [used] = await connection.execute(
+            "SELECT COUNT(*) AS n FROM questions WHERE media LIKE ? OR options LIKE ?",
+            [like, like],
+          );
+          if (used[0].n > 0) continue;
+          const full = path.join(UPLOAD_DIR, path.basename(url));
+          if (fs.existsSync(full)) {
+            fs.unlinkSync(full);
+            removedFiles++;
+          }
+        }
+      } catch (e) {
+        console.error("清理问卷的上传文件失败:", e);
+      }
+      await connection.end();
+      res.json({
+        success: true,
+        message: "问卷已删除",
+        removed_files: removedFiles,
+      });
+    } catch (err) {
+      await connection.rollback().catch(() => {});
+      await connection.end().catch(() => {});
+      console.error("删除问卷失败:", err);
+      res
+        .status(500)
+        .json({ success: false, message: "删除失败，问卷没有改动" });
     }
   },
 );
@@ -3316,7 +3594,8 @@ function histogram(values, lo, hi) {
 
 // 某份问卷的统计分析（统计页面和「导出统计结果」共用）
 // opts：group（只看某个分组，"__none__" 表示未分组）、completeOnly（只统计完整作答）、
-//       excludeFast（排除作答过快：平均每题不到 2 秒）、compareGroups（参与差异检验的分组，不传就自动选）
+//       excludeFast（排除作答过快：平均每题不到 2 秒）、compareGroups（参与差异检验的分组，不传就自动选）、
+//       keyTrim（按键作答统计里怎么排除异常题次，见 key-stats.js）
 // 返回 { error: { status, message } } 或统计结果
 async function computeStats(connection, questionnaireId, admin, opts) {
   const groupFilter = opts.group || "";
@@ -3844,12 +4123,16 @@ async function computeStats(connection, questionnaireId, admin, opts) {
     return item;
   });
 
+  // ---- 第八步：按键作答（按住时长、按下用时、把握程度），只用按键作答的答卷 ----
+  const key = keyStats.computeKeyStats(valid, questions, opts.keyTrim);
+
   return {
     questionnaire: { id: qRows[0].id, title: qRows[0].title },
     filter: {
       group: groupFilter,
       complete_only: completeOnly,
       exclude_fast: excludeFast,
+      key_trim: key.trim,
     },
     question_count: questions.length,
     groups,
@@ -3860,6 +4143,7 @@ async function computeStats(connection, questionnaireId, admin, opts) {
     reliability,
     norm_compare: normCompareResult,
     items,
+    key,
   };
 }
 
@@ -3869,6 +4153,7 @@ function statsOptsFromQuery(query) {
     group: query.group || "",
     completeOnly: query.complete_only !== "0",
     excludeFast: query.exclude_fast === "1",
+    keyTrim: query.key_trim,
     compareGroups: query.compare_groups
       ? String(query.compare_groups).split(",").filter(Boolean)
       : null,
@@ -3980,6 +4265,12 @@ app.get(
           ? `中位数 ${Math.round(st.overview.duration.median)} 秒`
           : "",
       ]);
+      if (st.key.has_key) {
+        info.addRow([
+          "按键作答",
+          `${st.key.persons} 份答卷、${st.key.total_trials} 个题次；${st.key.trim_label}（排除 ${st.key.excluded_trials} 个）`,
+        ]);
+      }
       info.getColumn(1).width = 14;
       info.getColumn(2).width = 60;
 
@@ -4190,6 +4481,184 @@ app.get(
           ]);
         }
         ns.columns.forEach((c) => (c.width = 12));
+      }
+
+      // 按键作答：按设备分开的描述统计、被试内分析、每道题
+      if (st.key.has_key) {
+        const k = st.key;
+        const scopeName = { all: "全部", key: "只看键盘", touch: "只看触屏" };
+        const scopeKeys = ["all", "key", "touch"].filter((s) => k.scopes[s]);
+        const kss = wb.addWorksheet("按键作答统计");
+        const title = (text) => {
+          kss.addRow([]);
+          kss.addRow([text]).font = { bold: true };
+        };
+        kss.addRow([
+          `按键作答 ${k.persons} 份答卷、${k.total_trials} 个题次；${k.trim_label}（排除 ${k.excluded_trials} 个）。按住时长 = 按下→松开，按下用时 = 题目出现→按下，单位毫秒。`,
+        ]);
+        kss.addRow([
+          "键盘和触屏的按法不同，绝对时长分开统计；被试内分析（三档、被试内相关）每人只和自己比，可以把两种设备合在一起看。",
+        ]);
+
+        title("一、按住时长（按作答输入分开）");
+        head(kss, [
+          "作答输入",
+          "人数",
+          "题次",
+          "排除题次",
+          "中位数",
+          "下四分位",
+          "上四分位",
+          "平均",
+          "标准差",
+          "最短",
+          "最长",
+          "每人中位数_平均",
+          "每人中位数_标准差",
+          "按下用时中位数",
+          ...(k.has_confidence ? ["平均把握"] : []),
+        ]);
+        k.devices.forEach((d) =>
+          kss.addRow([
+            d.label,
+            d.persons,
+            d.trials,
+            d.excluded,
+            v(d.hold.median),
+            v(d.hold.q1),
+            v(d.hold.q3),
+            v(d.hold.mean),
+            v(d.hold.sd),
+            v(d.hold.min),
+            v(d.hold.max),
+            v(d.person_median.mean),
+            v(d.person_median.sd),
+            v(d.rt_median),
+            ...(k.has_confidence ? [v(d.conf_mean)] : []),
+          ]),
+        );
+
+        if (k.has_confidence) {
+          title(
+            "二、按住时长分三档的平均把握程度（每人把自己的题次按按住时长从短到长分成三份，再对人求平均）",
+          );
+          head(kss, [
+            "范围",
+            "档",
+            "人数",
+            "平均按住时长",
+            "平均把握",
+            "95%置信区间_下限",
+            "95%置信区间_上限",
+          ]);
+          scopeKeys.forEach((s) =>
+            (k.scopes[s].bins || []).forEach((b) =>
+              kss.addRow([
+                scopeName[s],
+                b.label,
+                b.persons,
+                v(b.hold_mean),
+                v(b.conf_mean),
+                v(b.ci_low),
+                v(b.ci_high),
+              ]),
+            ),
+          );
+
+          title(
+            "三、按住时长和把握程度的被试内相关（repeated measures correlation）",
+          );
+          head(kss, [
+            "范围",
+            "人数",
+            "题次",
+            "r",
+            "自由度",
+            "p 值",
+            "每多按100毫秒把握变化",
+          ]);
+          scopeKeys.forEach((s) => {
+            const r = k.scopes[s].hold_conf;
+            if (!r) return;
+            kss.addRow([
+              scopeName[s],
+              r.persons,
+              r.trials,
+              v(r.r),
+              v(r.df),
+              formatP(r.p),
+              v(r.slope100),
+            ]);
+          });
+          kss.addRow([
+            "论文（Zhou 等, 2026, PNAS）实验 1：按得越久把握越低，约每 100 毫秒低 0.09 分（1-5 分制）。",
+          ]);
+        }
+
+        title(
+          `${k.has_confidence ? "四" : "二"}、按下用时和按住时长的关系（每人算一个相关，再检验平均相关是否为 0）`,
+        );
+        head(kss, ["范围", "人数", "平均 r", "标准误", "t", "自由度", "p 值"]);
+        scopeKeys.forEach((s) => {
+          const r = k.scopes[s].rt_hold;
+          if (!r) return;
+          kss.addRow([
+            scopeName[s],
+            r.persons,
+            v(r.mean_r),
+            v(r.se),
+            v(r.t),
+            v(r.df),
+            formatP(r.p),
+          ]);
+        });
+        kss.addRow([
+          "论文里两者基本无关（平均 r ≈ 0.01）；如果这里明显相关，说明按住时长里混进了反应快慢。",
+        ]);
+
+        title(
+          `${k.has_confidence ? "五" : "三"}、按住时长分布（每 50 毫秒一格，题次数）`,
+        );
+        head(kss, ["按住时长(ms)", ...k.histograms.map((h) => h.label)]);
+        (k.histograms[0]?.bins || []).forEach((b, i) =>
+          kss.addRow([b.label, ...k.histograms.map((h) => h.bins[i].count)]),
+        );
+        kss.columns.forEach((c) => (c.width = 13));
+        kss.getColumn(1).width = 14;
+
+        const kis = wb.addWorksheet("按键逐题统计");
+        head(kis, [
+          "题号",
+          "题目",
+          "题次",
+          "键盘题次",
+          "键盘_按住中位数",
+          "触屏题次",
+          "触屏_按住中位数",
+          "被试内标准分_平均",
+          ...(k.has_confidence ? ["平均把握"] : []),
+          "按下用时中位数",
+        ]);
+        k.items.forEach((it) =>
+          kis.addRow([
+            `Q${it.order_num}`,
+            it.content,
+            it.trials,
+            it.key_n,
+            v(it.key_median),
+            it.touch_n,
+            v(it.touch_median),
+            v(it.z_mean),
+            ...(k.has_confidence ? [v(it.conf_mean)] : []),
+            v(it.rt_median),
+          ]),
+        );
+        kis.addRow([]);
+        kis.addRow([
+          "被试内标准分：这一题的按住时长比这个人自己平时长（> 0）还是短（< 0），以本人的标准差为单位，再对所有人求平均；键盘和触屏可以合在一起比较。",
+        ]);
+        kis.columns.forEach((c) => (c.width = 13));
+        kis.getColumn(2).width = 40;
       }
 
       // 逐题分布

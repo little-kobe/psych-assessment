@@ -181,10 +181,6 @@ onMounted(() => {
 
 <template>
   <div class="container" v-loading="loading">
-    <el-button @click="router.push(`/questionnaire/${questionnaireId}`)" text
-      >← 返回问卷详情</el-button
-    >
-
     <div class="header">
       <h2>分数段报告配置</h2>
       <div style="display: flex; gap: 8px">
@@ -393,9 +389,8 @@ onMounted(() => {
 }
 
 .container {
-  max-width: 760px;
-  margin: 20px auto;
-  padding: 24px;
+  /* 显示在问卷外框（QuestionnaireShell）里，宽度跟外框一致 */
+  padding-bottom: 24px;
 }
 .header {
   display: flex;

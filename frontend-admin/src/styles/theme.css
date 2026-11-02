@@ -1,0 +1,58 @@
+/* 管理后台的整体配色和基础样式（暖色调，和登录页一致）
+   Element Plus 的主色改成橙棕色，按钮、链接、标签、选中状态都会跟着变 */
+:root {
+  --el-color-primary: #c85a22;
+  --el-color-primary-light-3: #d88c64;
+  --el-color-primary-light-5: #e4ac90;
+  --el-color-primary-light-7: #eecebd;
+  --el-color-primary-light-8: #f4ded3;
+  --el-color-primary-light-9: #faeee9;
+  --el-color-primary-dark-2: #a0481b;
+  --el-border-radius-base: 8px;
+  --el-font-family:
+    -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+
+  /* 后台自己用的颜色 */
+  --app-bg: #f7f4ee;
+  --app-card: #ffffff;
+  --app-border: #ece4d6;
+  --app-text: #3d2b12;
+  --app-text-2: #6b5b45;
+  --app-text-3: #9a8b73;
+  --app-accent-soft: #fff6e8;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--app-bg);
+  color: var(--app-text);
+  font-family: var(--el-font-family);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 表格表头稍微区分一下 */
+.el-table th.el-table__cell {
+  background: #faf7f2;
+  color: var(--app-text-2);
+  font-weight: 600;
+}
+
+/* 弹窗圆角 */
+.el-dialog {
+  border-radius: 14px;
+}
+
+/* 灰色说明框改成暖色，和整体配色一致 */
+.el-alert--info.is-light {
+  background-color: #f6f0e6;
+  color: var(--app-text-2);
+}
+.el-alert--info.is-light .el-alert__description {
+  color: var(--app-text-2);
+}
+.el-alert--info .el-alert__icon {
+  color: #b9a07a;
+}

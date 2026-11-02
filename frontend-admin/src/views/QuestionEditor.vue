@@ -816,10 +816,6 @@ onMounted(() => {
 
 <template>
   <div class="container" v-loading="loading">
-    <el-button @click="router.push(`/questionnaire/${questionnaireId}`)" text
-      >← 返回问卷详情</el-button
-    >
-
     <div class="header">
       <h2>题目编辑</h2>
       <div>
@@ -959,7 +955,11 @@ onMounted(() => {
                 >置顶</el-button
               >
               <el-button size="small" @click="openEdit(q)">编辑</el-button>
-              <el-button size="small" type="danger" @click="deleteQuestion(q)"
+              <el-button
+                size="small"
+                type="danger"
+                plain
+                @click="deleteQuestion(q)"
                 >删除</el-button
               >
             </div>
@@ -1251,9 +1251,8 @@ onMounted(() => {
 
 <style scoped>
 .container {
-  max-width: 860px;
-  margin: 20px auto;
-  padding: 24px;
+  /* 显示在问卷外框（QuestionnaireShell）里，宽度跟外框一致 */
+  padding-bottom: 24px;
 }
 .header {
   display: flex;
@@ -1272,7 +1271,8 @@ onMounted(() => {
   gap: 10px;
 }
 .q-card {
-  border: 1px solid #f0dcae;
+  border: 1px solid var(--app-border);
+  border-radius: 12px;
   cursor: grab;
   transition:
     box-shadow 0.2s,

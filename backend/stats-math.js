@@ -1,5 +1,6 @@
 // backend/stats-math.js
-// 统计分析用到的数学函数：t 分布、F 分布、正态分布的概率，Cronbach's α，t 检验，方差分析。
+// 统计分析用到的数学函数：t 分布、F 分布、正态分布的概率，Cronbach's α，t 检验，方差分析，
+// 置信区间，被试内相关（按键作答的统计用）。
 // 都是纯计算函数，不连数据库；结果已经用 Python 的 scipy 逐一核对过。
 
 // ---------- 概率分布 ----------
@@ -241,15 +242,81 @@ function oneSampleT(values, mu) {
   return { t, df: n - 1, p: tTwoTailedP(t, n - 1), d: (m - mu) / s };
 }
 
+// t 分布的双侧临界值（如 df = 10、alpha = 0.05 时约 2.228），用来算 95% 置信区间
+function tCritical(df, alpha = 0.05) {
+  if (!(df > 0)) return null;
+  let lo = 0;
+  let hi = 1000;
+  for (let i = 0; i < 100; i++) {
+    const mid = (lo + hi) / 2;
+    if (tTwoTailedP(mid, df) > alpha) lo = mid;
+    else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
+// 平均数和 95% 置信区间（t 分布）
+function meanCI(values) {
+  const n = values.length;
+  if (n === 0) return null;
+  const m = mean(values);
+  if (n < 2) return { n, mean: m, low: null, high: null };
+  const se = Math.sqrt(sampleVar(values) / n);
+  const tc = tCritical(n - 1);
+  return { n, mean: m, low: m - tc * se, high: m + tc * se };
+}
+
+// 被试内相关（repeated measures correlation，Bakdash & Marusich, 2017）：
+// 每个人的 x、y 先减去本人的平均数，再把所有人合在一起算相关，自由度 = 观测数 − 人数 − 1。
+// 只看同一个人内部 x 高的时候 y 是不是也高，人和人之间的差异（如手机和电脑整体按得快慢不同）不影响结果。
+// persons：每人一个数组，元素是 [x, y]；每人至少 2 个观测才计入。
+// 返回 r、自由度、p、斜率（x 每增加 1，y 平均变化多少，和固定被试截距的回归斜率相同）
+function rmCorr(persons) {
+  let sxy = 0;
+  let sxx = 0;
+  let syy = 0;
+  let N = 0;
+  let k = 0;
+  persons.forEach((obs) => {
+    if (obs.length < 2) return;
+    const mx = mean(obs.map((o) => o[0]));
+    const my = mean(obs.map((o) => o[1]));
+    obs.forEach(([x, y]) => {
+      sxy += (x - mx) * (y - my);
+      sxx += (x - mx) ** 2;
+      syy += (y - my) ** 2;
+    });
+    N += obs.length;
+    k++;
+  });
+  const df = N - k - 1;
+  if (k === 0 || df < 1 || sxx === 0 || syy === 0) {
+    return { r: null, df: df > 0 ? df : null, p: null, slope: null, n: N, k };
+  }
+  const r = sxy / Math.sqrt(sxx * syy);
+  const t = Math.abs(r) >= 1 ? Infinity : r * Math.sqrt(df / (1 - r * r));
+  return {
+    r,
+    df,
+    p: Number.isFinite(t) ? tTwoTailedP(t, df) : 0,
+    slope: sxy / sxx,
+    n: N,
+    k,
+  };
+}
+
 module.exports = {
   logGamma,
   betaInc,
   tTwoTailedP,
+  tCritical,
   fUpperP,
   normalCdf,
   mean,
   sampleVar,
+  meanCI,
   pearson,
+  rmCorr,
   cronbachAlpha,
   itemAnalysis,
   welchT,

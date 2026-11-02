@@ -87,7 +87,7 @@ onMounted(fetchBundles);
 </script>
 
 <template>
-  <div>
+  <div class="bundle-page">
     <div class="toolbar">
       <h2>问卷组合</h2>
       <el-button type="primary" @click="router.push('/bundle/new')"
@@ -184,17 +184,20 @@ onMounted(fetchBundles);
 </template>
 
 <style scoped>
+.bundle-page {
+  max-width: 1080px;
+  margin: 0 auto;
+}
 .toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 20px;
-  padding-bottom: 16px;
-  border-bottom: 1px solid #f0dcae;
+  margin-bottom: 18px;
 }
 .toolbar h2 {
   margin: 0;
-  font-size: 18px;
+  font-size: 22px;
+  font-weight: 650;
   color: #3d2b12;
 }
 .intro {

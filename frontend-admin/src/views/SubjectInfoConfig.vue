@@ -205,10 +205,6 @@ onMounted(fetchFields);
 
 <template>
   <div class="container" v-loading="loading">
-    <el-button @click="router.push(`/questionnaire/${questionnaireId}`)" text
-      >← 返回问卷详情</el-button
-    >
-
     <div class="header">
       <h2>被试基本信息配置</h2>
       <el-button type="primary" @click="saveFields" :loading="saving"
@@ -331,9 +327,8 @@ onMounted(fetchFields);
 
 <style scoped>
 .container {
-  max-width: 760px;
-  margin: 20px auto;
-  padding: 24px;
+  /* 显示在问卷外框（QuestionnaireShell）里，宽度跟外框一致 */
+  padding-bottom: 24px;
 }
 .header {
   display: flex;

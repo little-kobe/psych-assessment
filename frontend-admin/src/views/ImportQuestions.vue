@@ -1,8 +1,9 @@
 <script setup>
-import { ref, onMounted } from "vue";
+import { ref, computed, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import CopyQuestionsDialog from "../components/CopyQuestionsDialog.vue";
+import PageCrumbs from "../components/PageCrumbs.vue";
 import { API_BASE } from "../api.js";
 
 const route = useRoute();
@@ -184,17 +185,22 @@ async function uploadFile() {
   }
 }
 
-function goBack() {
-  if (route.query.qid) router.push(`/questionnaire/${route.query.qid}`);
-  else router.push("/");
-}
+// 面包屑：问卷管理 / 选中的问卷 / 导入题目
+const crumbs = computed(() => {
+  const q = questionnaires.value.find((x) => x.id === questionnaireId.value);
+  return [
+    { label: "问卷管理", to: "/" },
+    ...(q ? [{ label: q.title, to: `/questionnaire/${q.id}` }] : []),
+    { label: "导入题目" },
+  ];
+});
 
 onMounted(fetchQuestionnaires);
 </script>
 
 <template>
   <div class="container">
-    <el-button @click="goBack" text>← 返回</el-button>
+    <PageCrumbs :items="crumbs" />
 
     <div class="header">
       <h2>导入题目</h2>
@@ -342,19 +348,19 @@ onMounted(fetchQuestionnaires);
 
 <style scoped>
 .container {
-  max-width: 820px;
-  margin: 20px auto;
-  padding: 24px;
+  max-width: 880px;
+  margin: 0 auto;
+  padding-bottom: 24px;
 }
 .header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin: 16px 0;
+  margin: 0 0 16px;
 }
 .header h2 {
   margin: 0;
-  font-size: 20px;
+  font-size: 22px;
   color: #3d2b12;
 }
 .card {
