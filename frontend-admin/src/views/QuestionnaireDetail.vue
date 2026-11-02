@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from "vue";
+import { ref, computed, onMounted } from "vue";
 import { ArrowLeft } from "@element-plus/icons-vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
@@ -92,6 +92,9 @@ function openEditDialog() {
     max_responses: questionnaire.value.max_responses || null,
     expires_at: questionnaire.value.expires_at || null,
     show_report_chart: !!questionnaire.value.show_report_chart,
+    answer_mode: questionnaire.value.answer_mode || "click",
+    key_practice: questionnaire.value.key_practice ?? 3,
+    key_confidence: !!questionnaire.value.key_confidence,
   };
   showEditDialog.value = true;
 }
@@ -191,6 +194,18 @@ async function exportData() {
     exporting.value = false;
   }
 }
+
+// 作答详情里有没有按键作答的数据（有才显示那几列）
+const detailHasKey = computed(() =>
+  (answerDetail.value?.answers || []).some(
+    (a) => a.hold_ms !== null && a.hold_ms !== undefined,
+  ),
+);
+const detailHasConfidence = computed(() =>
+  (answerDetail.value?.answers || []).some(
+    (a) => a.confidence !== null && a.confidence !== undefined,
+  ),
+);
 
 // 是否答完整：后端按题目逻辑算（被跳过的题不算缺）；旧版后端没有这个字段时按答题数判断
 function isComplete(row) {
@@ -398,6 +413,14 @@ onMounted(fetchDetail);
           {{ questionnaire.track_timing ? "已开启时长记录" : "未开启时长记录" }}
         </el-tag>
         <el-tag size="small" type="info">共 {{ questions.length }} 道题</el-tag>
+        <el-tag
+          v-if="questionnaire.answer_mode === 'key'"
+          size="small"
+          type="warning"
+          >按键作答{{
+            questionnaire.key_confidence ? " · 问把握程度" : ""
+          }}</el-tag
+        >
       </div>
 
       <el-tabs
@@ -605,7 +628,7 @@ onMounted(fetchDetail);
       </el-tabs>
     </template>
 
-    <el-dialog v-model="showEditDialog" title="编辑问卷" width="480px">
+    <el-dialog v-model="showEditDialog" title="编辑问卷" width="560px">
       <el-form :model="editForm" label-width="90px">
         <el-form-item label="问卷标题">
           <el-input v-model="editForm.title" />
@@ -633,6 +656,35 @@ onMounted(fetchDetail);
             显示每个维度的得分、所有人的平均分和对应说明（需要先配置维度）。
           </div>
         </el-form-item>
+        <el-divider>答题方式</el-divider>
+        <el-form-item label="作答方式">
+          <el-radio-group v-model="editForm.answer_mode">
+            <el-radio value="click">点击作答</el-radio>
+            <el-radio value="key">按键作答（记录按键时长）</el-radio>
+          </el-radio-group>
+          <div class="form-tip">
+            按键作答：电脑上用键盘字母键 A、B、C…
+            作答，记录「题目出现→按下」和「按下→松开」的毫秒数；手机上记录手指按下到抬起的时间。适用于量表、单选、是否题，多选和开放题照常作答。生成链接时也可以单独指定。
+          </div>
+        </el-form-item>
+        <template v-if="editForm.answer_mode === 'key'">
+          <el-form-item label="练习题">
+            <el-input-number
+              v-model="editForm.key_practice"
+              :min="0"
+              :max="5"
+              controls-position="right"
+              style="width: 110px"
+            />
+            <span class="form-tip-inline">道，正式作答前熟悉按键，不保存</span>
+          </el-form-item>
+          <el-form-item label="把握程度">
+            <el-switch
+              v-model="editForm.key_confidence"
+              active-text="每题答完后问一次把握程度（1-5）"
+            />
+          </el-form-item>
+        </template>
         <el-divider>回收控制</el-divider>
         <el-form-item label="问卷状态">
           <el-switch
@@ -870,6 +922,30 @@ onMounted(fetchDetail);
                 }}
               </template>
             </el-table-column>
+            <!-- 按键作答：按下用时、按住时长、把握程度 -->
+            <template v-if="detailHasKey">
+              <el-table-column label="按下用时" width="88">
+                <template #default="scope">
+                  {{ scope.row.rt_ms !== null ? scope.row.rt_ms + "ms" : "-" }}
+                </template>
+              </el-table-column>
+              <el-table-column label="按住时长" width="88">
+                <template #default="scope">
+                  {{
+                    scope.row.hold_ms !== null ? scope.row.hold_ms + "ms" : "-"
+                  }}
+                </template>
+              </el-table-column>
+              <el-table-column
+                v-if="detailHasConfidence"
+                label="把握"
+                width="60"
+              >
+                <template #default="scope">
+                  {{ scope.row.confidence ?? "-" }}
+                </template>
+              </el-table-column>
+            </template>
           </el-table>
         </div>
       </div>
@@ -1123,5 +1199,16 @@ onMounted(fetchDetail);
   display: inline-block;
   min-width: 110px;
   color: #2f5d8a;
+}
+.form-tip {
+  font-size: 12px;
+  color: #999;
+  line-height: 1.6;
+  width: 100%;
+}
+.form-tip-inline {
+  margin-left: 8px;
+  font-size: 12px;
+  color: #999;
 }
 </style>

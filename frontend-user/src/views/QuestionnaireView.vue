@@ -1,8 +1,27 @@
 <script setup>
-import { ref, onMounted, computed, watch } from "vue";
+import {
+  ref,
+  reactive,
+  onMounted,
+  onBeforeUnmount,
+  computed,
+  watch,
+  nextTick,
+} from "vue";
 import { useRoute } from "vue-router";
 import { API_BASE } from "../api.js";
 import { evaluateLogic, normalizeLogic } from "../logic.js";
+import KeyOptions from "../components/KeyOptions.vue";
+import {
+  PRACTICE_ITEMS,
+  CONFIDENCE_LEVELS,
+  isKeyCapable,
+  letterOf,
+  letterIndexFromEvent,
+  digitFromEvent,
+  eventTime,
+  isTouchDevice,
+} from "../keyResponse.js";
 
 // 两种入口：/q/问卷编号（单份问卷）、/b/组合编号（问卷组合：依次作答几份问卷）
 const route = useRoute();
@@ -218,6 +237,276 @@ watch(inQuiz, (now) => {
   if (now) currentQuestionStartTime.value = Date.now();
 });
 
+// ================= 按键作答模式 =================
+// 问卷设置里选了「按键作答」，或者链接里带 ?mode=key（?mode=click 强制点击作答）
+const linkMode = ["key", "click"].includes(route.query.mode)
+  ? route.query.mode
+  : null;
+const keyMode = computed(
+  () => (linkMode || questionnaire.value?.answer_mode || "click") === "key",
+);
+const touchDevice = isTouchDevice();
+const keyConfidenceOn = computed(() => !!questionnaire.value?.key_confidence);
+// 说明和练习：一次作答只做一次（组合里第一份按键作答的问卷之前）
+const keyStage = ref("guide"); // guide 说明 → practice 练习 → practiceDone 练习结束 → formal 正式作答
+const practiceCount = computed(() =>
+  Math.max(
+    0,
+    Math.min(PRACTICE_ITEMS.length, questionnaire.value?.key_practice ?? 3),
+  ),
+);
+const practiceIndex = ref(0);
+// 当前这一个按键试次的状态
+const trial = reactive({
+  phase: "idle", // idle 还没准备好 / ready 等待按键 / pressed 按着 / done 已作答 / confidence 回答把握程度
+  shownAt: 0, // 题目出现的时刻
+  downAt: 0, // 按下的时刻
+  pressedIndex: -1, // 按下的是第几个选项
+  code: "", // 按下的物理按键（松开时对上同一个键）
+  pointerId: null, // 触屏按下的手指
+  input: "", // key 键盘 / touch 触屏
+});
+const keyData = ref({}); // 正式作答的按键数据：{ 题目id: { rt_ms, hold_ms, input_method, confidence } }
+const keyHint = ref(""); // 临时提示（如用鼠标点了选项）
+let hintTimer = null;
+let advanceTimer = null;
+
+// 现在显示的是练习题还是正式题；正式题里多选、开放题照常用鼠标/手指作答
+const practicing = computed(
+  () => keyMode.value && keyStage.value === "practice",
+);
+const keyTrialOn = computed(
+  () =>
+    keyMode.value &&
+    (practicing.value ||
+      (keyStage.value === "formal" && isKeyCapable(currentQuestion.value))),
+);
+const trialQuestion = computed(() =>
+  practicing.value
+    ? PRACTICE_ITEMS[practiceIndex.value]
+    : currentQuestion.value,
+);
+// 当前题的选项（按显示顺序，第 i 个对应字母 A、B、C…）：{ value 记录的答案, label, image }
+const trialOptions = computed(() => {
+  const q = trialQuestion.value;
+  if (!q) return [];
+  if (practicing.value) return q.options.map((t) => ({ value: t, label: t }));
+  const type = q.question_type || "scale";
+  if (type === "yes_no")
+    return [
+      { value: "是", label: "是" },
+      { value: "否", label: "否" },
+    ];
+  if (type === "single_choice") {
+    return shownOptions(q).map((o) => ({
+      value: o.label,
+      label: o.label,
+      image: o.image ? mediaUrl(o.image) : null,
+    }));
+  }
+  const imgs = scaleImageOptions(q);
+  if (imgs.length > 0)
+    return imgs.map((o) => ({
+      value: o.score,
+      label: o.label || String(o.score),
+      image: mediaUrl(o.image),
+    }));
+  const texts = scaleTextOptions(q);
+  if (texts.length > 0)
+    return texts.map((o) => ({ value: o.score, label: o.label }));
+  const list = [];
+  for (let s = q.min_score; s <= q.max_score; s++) {
+    let label = String(s);
+    if (s === q.min_score) label += `（${scaleEndLabel(q, "min")}）`;
+    if (s === q.max_score) label += `（${scaleEndLabel(q, "max")}）`;
+    list.push({ value: s, label });
+  }
+  return list;
+});
+
+function showKeyHint(text) {
+  keyHint.value = text;
+  clearTimeout(hintTimer);
+  hintTimer = setTimeout(() => (keyHint.value = ""), 2500);
+}
+
+// 新的一题（或练习题）显示出来以后，开始计时、等待按键
+async function startTrial() {
+  trial.phase = "idle";
+  trial.pressedIndex = -1;
+  trial.code = "";
+  trial.pointerId = null;
+  await nextTick();
+  // 等题目真正画到屏幕上（两帧之后）再开始计时
+  requestAnimationFrame(() =>
+    requestAnimationFrame(() => {
+      if (!keyTrialOn.value) return;
+      trial.shownAt = performance.now();
+      trial.phase = "ready";
+    }),
+  );
+}
+watch(
+  () => [
+    keyTrialOn.value,
+    inQuiz.value,
+    keyStage.value,
+    practiceIndex.value,
+    currentId.value,
+  ],
+  () => {
+    clearTimeout(advanceTimer);
+    if (keyTrialOn.value && inQuiz.value) startTrial();
+    else trial.phase = "idle";
+  },
+);
+
+function pressOption(index, time, input, code = "", pointerId = null) {
+  trial.phase = "pressed";
+  trial.pressedIndex = index;
+  trial.downAt = time;
+  trial.input = input;
+  trial.code = code;
+  trial.pointerId = pointerId;
+}
+
+// 松开：记录这次作答
+function releaseOption(time) {
+  const opt = trialOptions.value[trial.pressedIndex];
+  if (!opt) return;
+  const rt = Math.max(0, Math.round(trial.downAt - trial.shownAt));
+  const hold = Math.max(0, Math.round(time - trial.downAt));
+  trial.phase = "done";
+  if (practicing.value) {
+    advanceTimer = setTimeout(afterTrial, 450);
+    return;
+  }
+  const q = currentQuestion.value;
+  answersMap.value[q.id] = opt.value;
+  keyData.value[q.id] = { rt_ms: rt, hold_ms: hold, input_method: trial.input };
+  questionDurations.value[q.id] = Math.round(time - trial.shownAt);
+  advanceTimer = setTimeout(afterTrial, 350);
+}
+
+// 一题答完：要问把握程度就先问，否则进入下一题
+function afterTrial() {
+  if (keyConfidenceOn.value) {
+    trial.phase = "confidence";
+    return;
+  }
+  nextTrial();
+}
+
+function chooseConfidence(level) {
+  if (trial.phase !== "confidence") return;
+  if (!practicing.value) {
+    const q = currentQuestion.value;
+    keyData.value[q.id] = { ...keyData.value[q.id], confidence: level };
+  }
+  trial.phase = "done";
+  advanceTimer = setTimeout(nextTrial, 200);
+}
+
+function nextTrial() {
+  if (practicing.value) {
+    if (practiceIndex.value < practiceCount.value - 1) practiceIndex.value++;
+    else keyStage.value = "practiceDone";
+    return;
+  }
+  goNext();
+}
+
+// 没按完就切走了（切换窗口、来电话）：这次按键作废，重新按
+function cancelPress() {
+  if (trial.phase === "pressed") {
+    trial.phase = "ready";
+    trial.pressedIndex = -1;
+  }
+}
+
+function onKeyDown(e) {
+  if (!keyTrialOn.value || !inQuiz.value) return;
+  if (trial.phase === "confidence") {
+    const d = digitFromEvent(e);
+    if (d && !e.repeat) {
+      e.preventDefault();
+      chooseConfidence(d);
+    }
+    return;
+  }
+  const index = letterIndexFromEvent(e);
+  if (index < 0 || e.ctrlKey || e.metaKey || e.altKey) return;
+  e.preventDefault();
+  // 按住不放时浏览器会不断重复发出「按下」，只认第一次
+  if (e.repeat || trial.phase !== "ready") return;
+  if (index >= trialOptions.value.length) {
+    showKeyHint(
+      `这道题只有 A–${letterOf(trialOptions.value.length - 1)} 几个选项`,
+    );
+    return;
+  }
+  pressOption(index, eventTime(e), "key", e.code);
+}
+
+function onKeyUp(e) {
+  if (trial.phase !== "pressed" || trial.input !== "key") return;
+  if (e.code !== trial.code) return; // 松开的不是按下的那个键
+  e.preventDefault();
+  releaseOption(eventTime(e));
+}
+
+// 触屏：手指按下、抬起选项；鼠标点击不算（电脑上要用键盘）
+function onOptionPress(e, index) {
+  if (e.pointerType === "mouse") {
+    showKeyHint(
+      touchDevice
+        ? "请直接用手指点选项"
+        : "这份问卷用键盘作答：请按选项前面的字母键，不用点鼠标",
+    );
+    return;
+  }
+  if (trial.phase !== "ready") return;
+  e.preventDefault();
+  e.currentTarget.setPointerCapture?.(e.pointerId);
+  pressOption(index, eventTime(e), "touch", "", e.pointerId);
+}
+function onOptionRelease(e) {
+  if (trial.phase !== "pressed" || trial.input !== "touch") return;
+  if (e.pointerId !== trial.pointerId) return;
+  releaseOption(eventTime(e));
+}
+function onOptionCancel() {
+  if (trial.input === "touch") cancelPress();
+}
+function onVisibility() {
+  if (document.hidden) cancelPress();
+}
+
+function startPractice() {
+  practiceIndex.value = 0;
+  keyStage.value = practiceCount.value > 0 ? "practice" : "formal";
+}
+function startFormal() {
+  keyStage.value = "formal";
+  currentQuestionStartTime.value = Date.now();
+}
+
+onMounted(() => {
+  window.addEventListener("keydown", onKeyDown);
+  window.addEventListener("keyup", onKeyUp);
+  window.addEventListener("blur", cancelPress);
+  document.addEventListener("visibilitychange", onVisibility);
+});
+onBeforeUnmount(() => {
+  window.removeEventListener("keydown", onKeyDown);
+  window.removeEventListener("keyup", onKeyUp);
+  window.removeEventListener("blur", cancelPress);
+  document.removeEventListener("visibilitychange", onVisibility);
+  clearTimeout(hintTimer);
+  clearTimeout(advanceTimer);
+});
+// ================= 按键作答模式（结束） =================
+
 // 把选项统一成 [{ label, score, image }] 格式（兼容旧数据：纯文字数组）
 function parseOptions(options) {
   let arr = options;
@@ -318,6 +607,7 @@ function parseFields(fields) {
 // 开始作答某一份问卷：清空上一份的作答状态
 function startUnit() {
   answersMap.value = {};
+  keyData.value = {};
   questionDurations.value = {};
   allQuestions.value.forEach((q) => {
     questionDurations.value[q.id] = 0;
@@ -523,6 +813,7 @@ async function submitQuestionnaire() {
       answer_value: answerValue,
       answer_text: answerText,
       duration_ms: questionDurations.value[q.id] || 0,
+      ...(keyData.value[q.id] || {}), // 按键作答：按下用时、按住时长、输入方式、把握程度
     };
   });
 
@@ -545,6 +836,7 @@ async function submitQuestionnaire() {
         finished_at: toDbTime(finishedAt),
         answers,
         subject_info: subjectInfo,
+        answer_mode: keyMode.value ? "key" : "click",
         ...(isBundle
           ? {
               bundle_id: entityId,
@@ -915,296 +1207,404 @@ const nextUnitInfo = computed(() => units.value[unitIndex.value + 1] || null);
           </p>
         </div>
 
-        <div class="progress-track">
-          <div
-            class="progress-fill"
-            :style="{ width: progressPercent + '%' }"
-          ></div>
-        </div>
-        <p class="progress-label">
-          第 {{ currentIndex + 1 }} 题<template v-if="!hasLogic">
-            / 共 {{ currentQuestions.length }} 题</template
-          >
-          <span v-if="hasParentSection" style="margin-left: 8px; opacity: 0.6">
-            （总进度 {{ progressPercent }}%）
-          </span>
-        </p>
-
-        <div class="question-area" v-if="currentQuestion">
-          <!-- 板块标题和引导语 -->
-          <div v-if="currentSection" class="section-box">
-            <p class="section-title">{{ currentSection.title }}</p>
-            <p v-if="currentSection.intro" class="section-intro">
-              {{ currentSection.intro }}
+        <!-- 按键作答：先看说明、做练习 -->
+        <div v-if="keyMode && keyStage !== 'formal'" class="key-intro">
+          <template v-if="keyStage === 'guide'">
+            <p class="key-intro-title">
+              {{ touchDevice ? "本问卷用手指点选项作答" : "本问卷用键盘作答" }}
             </p>
-          </div>
-          <p class="question-text">{{ currentQuestion.content }}</p>
-
-          <!-- 题目的图片 / 视频 / 音频（屏蔽右键另存、拖动保存、下载按钮） -->
-          <div
-            v-if="currentMedia.length > 0"
-            class="q-media no-save"
-            @contextmenu.prevent
-            @dragstart.prevent
-          >
-            <template v-for="m in currentMedia" :key="m.url">
-              <img
-                v-if="m.type === 'image'"
-                :src="mediaUrl(m.url)"
-                class="q-media-img"
-                alt="题目图片"
-                @click="zoomImage = mediaUrl(m.url)"
-              />
-              <video
-                v-else-if="m.type === 'video'"
-                :src="mediaUrl(m.url)"
-                class="q-media-video"
-                controls
-                controlslist="nodownload noplaybackrate noremoteplayback"
-                disablepictureinpicture
-                playsinline
-                preload="metadata"
-              ></video>
-              <audio
-                v-else-if="m.type === 'audio'"
-                :src="mediaUrl(m.url)"
-                class="q-media-audio"
-                controls
-                controlslist="nodownload noplaybackrate"
-                preload="metadata"
-              ></audio>
-            </template>
-            <p
-              v-if="currentMedia.some((m) => m.type === 'image')"
-              class="media-hint"
-            >
-              点击图片可以放大
+            <ul class="key-intro-list">
+              <template v-if="!touchDevice">
+                <li>
+                  每个选项前面有一个字母（A、B、C……）。看完题目后，直接按对应的字母键作答，松开按键后自动进入下一题。
+                </li>
+                <li>请把手放在键盘上，不用点鼠标。</li>
+              </template>
+              <li v-else>
+                每个选项前面有一个字母。看完题目后，直接用手指点你选的选项，手指离开屏幕后自动进入下一题。
+              </li>
+              <li>每道题只能作答一次，不能返回修改。</li>
+              <li v-if="keyConfidenceOn">
+                每道题答完后，会问你对这个回答有多大把握，{{
+                  touchDevice ? "点 1–5 回答" : "按数字键 1–5 回答"
+                }}。
+              </li>
+              <li>
+                遇到多选题或需要输入文字的题，照常用{{
+                  touchDevice ? "手指" : "鼠标"
+                }}作答，再点「下一题」。
+              </li>
+            </ul>
+            <p v-if="practiceCount > 0" class="key-intro-note">
+              先做 {{ practiceCount }} 道练习题熟悉一下，练习不计入结果。
             </p>
-          </div>
-
-          <!-- 量表题 -->
-          <template
-            v-if="
-              !currentQuestion.question_type ||
-              currentQuestion.question_type === 'scale'
-            "
-          >
-            <!-- 每个分数都配了图片：显示图片选项（如表情量表） -->
-            <div
-              v-if="scaleImageOptions(currentQuestion).length > 0"
-              class="image-options scale-images no-save"
-              @contextmenu.prevent
-              @dragstart.prevent
-              :style="scaleGridStyle(currentQuestion)"
-            >
-              <button
-                v-for="opt in scaleImageOptions(currentQuestion)"
-                :key="opt.score"
-                class="image-option"
-                :class="{ active: currentAnswer === opt.score }"
-                @click="selectAnswer(opt.score)"
-              >
-                <img :src="mediaUrl(opt.image)" :alt="opt.label || opt.score" />
-                <span v-if="opt.label" class="image-option-label">{{
-                  opt.label
-                }}</span>
-              </button>
-            </div>
-            <!-- 每个分数都配了文字：只显示文字，选中后记录对应分数 -->
-            <div
-              v-else-if="scaleTextOptions(currentQuestion).length > 0"
-              class="text-options"
-            >
-              <button
-                v-for="opt in scaleTextOptions(currentQuestion)"
-                :key="opt.score"
-                class="text-option-btn"
-                :class="{ active: currentAnswer === opt.score }"
-                @click="selectAnswer(opt.score)"
-              >
-                {{ opt.label }}
-              </button>
-            </div>
-            <!-- 没配文字：显示数字按钮 -->
-            <template v-else>
-              <div class="options">
-                <button
-                  v-for="n in currentQuestion.max_score -
-                  currentQuestion.min_score +
-                  1"
-                  :key="n"
-                  class="option-btn"
-                  :class="{
-                    active: currentAnswer === currentQuestion.min_score + n - 1,
-                  }"
-                  @click="selectAnswer(currentQuestion.min_score + n - 1)"
-                >
-                  {{ currentQuestion.min_score + n - 1 }}
-                </button>
-              </div>
-              <div class="option-labels">
-                <span>{{ scaleEndLabel(currentQuestion, "min") }}</span
-                ><span>{{ scaleEndLabel(currentQuestion, "max") }}</span>
-              </div>
-            </template>
+            <button class="consent-btn" @click="startPractice">
+              {{ practiceCount > 0 ? "开始练习" : "开始作答" }}
+            </button>
           </template>
 
-          <!-- 单选题（图片选项） -->
-          <div
-            v-else-if="
-              currentQuestion.question_type === 'single_choice' &&
-              choiceHasImages(currentQuestion)
-            "
-            class="image-options no-save"
-            @contextmenu.prevent
-            @dragstart.prevent
-          >
-            <button
-              v-for="opt in shownOptions(currentQuestion)"
-              :key="opt.label"
-              class="image-option"
-              :class="{ active: currentAnswer === opt.label }"
-              @click="selectAnswer(opt.label)"
-            >
-              <img
-                v-if="opt.image"
-                :src="mediaUrl(opt.image)"
-                :alt="opt.label"
-              />
-              <span class="image-option-label">{{ opt.label }}</span>
-            </button>
-          </div>
+          <template v-else-if="keyStage === 'practice'">
+            <p class="practice-badge">
+              练习 {{ practiceIndex + 1 }} / {{ practiceCount }}
+            </p>
+            <p class="question-text">{{ trialQuestion.content }}</p>
+            <KeyOptions
+              :options="trialOptions"
+              :pressed-index="trial.pressedIndex"
+              :phase="trial.phase"
+              :touch="touchDevice"
+              :hint="keyHint"
+              @press="onOptionPress"
+              @release="onOptionRelease"
+              @cancel="onOptionCancel"
+              @confidence="chooseConfidence"
+            />
+          </template>
 
-          <!-- 单选题（文字选项） -->
-          <div
-            v-else-if="currentQuestion.question_type === 'single_choice'"
-            class="text-options"
-          >
-            <button
-              v-for="opt in shownOptions(currentQuestion)"
-              :key="opt.label"
-              class="text-option-btn"
-              :class="{ active: currentAnswer === opt.label }"
-              @click="selectAnswer(opt.label)"
-            >
-              {{ opt.label }}
+          <template v-else>
+            <p class="key-intro-title">练习结束</p>
+            <p class="key-intro-note">
+              正式作答的操作和刚才一样。每道题只能作答一次，不能返回修改。
+            </p>
+            <button class="consent-btn" @click="startFormal">
+              开始正式作答
             </button>
-          </div>
+          </template>
+        </div>
 
-          <!-- 多选题（图片选项） -->
-          <div
-            v-else-if="
-              currentQuestion.question_type === 'multiple_choice' &&
-              choiceHasImages(currentQuestion)
-            "
-          >
-            <p class="multi-hint">可多选</p>
+        <template v-else>
+          <div class="progress-track">
             <div
-              class="image-options no-save"
+              class="progress-fill"
+              :style="{ width: progressPercent + '%' }"
+            ></div>
+          </div>
+          <p class="progress-label">
+            第 {{ currentIndex + 1 }} 题<template v-if="!hasLogic">
+              / 共 {{ currentQuestions.length }} 题</template
+            >
+            <span
+              v-if="hasParentSection"
+              style="margin-left: 8px; opacity: 0.6"
+            >
+              （总进度 {{ progressPercent }}%）
+            </span>
+          </p>
+
+          <div class="question-area" v-if="currentQuestion">
+            <!-- 板块标题和引导语 -->
+            <div v-if="currentSection" class="section-box">
+              <p class="section-title">{{ currentSection.title }}</p>
+              <p v-if="currentSection.intro" class="section-intro">
+                {{ currentSection.intro }}
+              </p>
+            </div>
+            <p class="question-text">{{ currentQuestion.content }}</p>
+
+            <!-- 题目的图片 / 视频 / 音频（屏蔽右键另存、拖动保存、下载按钮） -->
+            <div
+              v-if="currentMedia.length > 0"
+              class="q-media no-save"
               @contextmenu.prevent
               @dragstart.prevent
             >
-              <button
-                v-for="opt in shownOptions(currentQuestion)"
-                :key="opt.label"
-                class="image-option"
-                :class="{ active: isMultiSelected(opt.label) }"
-                @click="toggleMultiAnswer(opt.label)"
-              >
+              <template v-for="m in currentMedia" :key="m.url">
                 <img
-                  v-if="opt.image"
-                  :src="mediaUrl(opt.image)"
-                  :alt="opt.label"
+                  v-if="m.type === 'image'"
+                  :src="mediaUrl(m.url)"
+                  class="q-media-img"
+                  alt="题目图片"
+                  @click="zoomImage = mediaUrl(m.url)"
                 />
-                <span class="image-option-label">{{ opt.label }}</span>
-              </button>
+                <video
+                  v-else-if="m.type === 'video'"
+                  :src="mediaUrl(m.url)"
+                  class="q-media-video"
+                  controls
+                  controlslist="nodownload noplaybackrate noremoteplayback"
+                  disablepictureinpicture
+                  playsinline
+                  preload="metadata"
+                ></video>
+                <audio
+                  v-else-if="m.type === 'audio'"
+                  :src="mediaUrl(m.url)"
+                  class="q-media-audio"
+                  controls
+                  controlslist="nodownload noplaybackrate"
+                  preload="metadata"
+                ></audio>
+              </template>
+              <p
+                v-if="currentMedia.some((m) => m.type === 'image')"
+                class="media-hint"
+              >
+                点击图片可以放大
+              </p>
             </div>
+
+            <!-- 按键作答：量表、单选、是否题用字母选项 -->
+            <KeyOptions
+              v-if="keyTrialOn"
+              :options="trialOptions"
+              :pressed-index="trial.pressedIndex"
+              :phase="trial.phase"
+              :touch="touchDevice"
+              :hint="keyHint"
+              @press="onOptionPress"
+              @release="onOptionRelease"
+              @cancel="onOptionCancel"
+              @confidence="chooseConfidence"
+            />
+            <template v-else>
+              <p v-if="keyMode" class="key-other-tip">
+                这道题照常用{{
+                  touchDevice ? "手指" : "鼠标"
+                }}作答，完成后点「下一题」
+              </p>
+              <!-- 量表题 -->
+              <template
+                v-if="
+                  !currentQuestion.question_type ||
+                  currentQuestion.question_type === 'scale'
+                "
+              >
+                <!-- 每个分数都配了图片：显示图片选项（如表情量表） -->
+                <div
+                  v-if="scaleImageOptions(currentQuestion).length > 0"
+                  class="image-options scale-images no-save"
+                  @contextmenu.prevent
+                  @dragstart.prevent
+                  :style="scaleGridStyle(currentQuestion)"
+                >
+                  <button
+                    v-for="opt in scaleImageOptions(currentQuestion)"
+                    :key="opt.score"
+                    class="image-option"
+                    :class="{ active: currentAnswer === opt.score }"
+                    @click="selectAnswer(opt.score)"
+                  >
+                    <img
+                      :src="mediaUrl(opt.image)"
+                      :alt="opt.label || opt.score"
+                    />
+                    <span v-if="opt.label" class="image-option-label">{{
+                      opt.label
+                    }}</span>
+                  </button>
+                </div>
+                <!-- 每个分数都配了文字：只显示文字，选中后记录对应分数 -->
+                <div
+                  v-else-if="scaleTextOptions(currentQuestion).length > 0"
+                  class="text-options"
+                >
+                  <button
+                    v-for="opt in scaleTextOptions(currentQuestion)"
+                    :key="opt.score"
+                    class="text-option-btn"
+                    :class="{ active: currentAnswer === opt.score }"
+                    @click="selectAnswer(opt.score)"
+                  >
+                    {{ opt.label }}
+                  </button>
+                </div>
+                <!-- 没配文字：显示数字按钮 -->
+                <template v-else>
+                  <div class="options">
+                    <button
+                      v-for="n in currentQuestion.max_score -
+                      currentQuestion.min_score +
+                      1"
+                      :key="n"
+                      class="option-btn"
+                      :class="{
+                        active:
+                          currentAnswer === currentQuestion.min_score + n - 1,
+                      }"
+                      @click="selectAnswer(currentQuestion.min_score + n - 1)"
+                    >
+                      {{ currentQuestion.min_score + n - 1 }}
+                    </button>
+                  </div>
+                  <div class="option-labels">
+                    <span>{{ scaleEndLabel(currentQuestion, "min") }}</span
+                    ><span>{{ scaleEndLabel(currentQuestion, "max") }}</span>
+                  </div>
+                </template>
+              </template>
+
+              <!-- 单选题（图片选项） -->
+              <div
+                v-else-if="
+                  currentQuestion.question_type === 'single_choice' &&
+                  choiceHasImages(currentQuestion)
+                "
+                class="image-options no-save"
+                @contextmenu.prevent
+                @dragstart.prevent
+              >
+                <button
+                  v-for="opt in shownOptions(currentQuestion)"
+                  :key="opt.label"
+                  class="image-option"
+                  :class="{ active: currentAnswer === opt.label }"
+                  @click="selectAnswer(opt.label)"
+                >
+                  <img
+                    v-if="opt.image"
+                    :src="mediaUrl(opt.image)"
+                    :alt="opt.label"
+                  />
+                  <span class="image-option-label">{{ opt.label }}</span>
+                </button>
+              </div>
+
+              <!-- 单选题（文字选项） -->
+              <div
+                v-else-if="currentQuestion.question_type === 'single_choice'"
+                class="text-options"
+              >
+                <button
+                  v-for="opt in shownOptions(currentQuestion)"
+                  :key="opt.label"
+                  class="text-option-btn"
+                  :class="{ active: currentAnswer === opt.label }"
+                  @click="selectAnswer(opt.label)"
+                >
+                  {{ opt.label }}
+                </button>
+              </div>
+
+              <!-- 多选题（图片选项） -->
+              <div
+                v-else-if="
+                  currentQuestion.question_type === 'multiple_choice' &&
+                  choiceHasImages(currentQuestion)
+                "
+              >
+                <p class="multi-hint">可多选</p>
+                <div
+                  class="image-options no-save"
+                  @contextmenu.prevent
+                  @dragstart.prevent
+                >
+                  <button
+                    v-for="opt in shownOptions(currentQuestion)"
+                    :key="opt.label"
+                    class="image-option"
+                    :class="{ active: isMultiSelected(opt.label) }"
+                    @click="toggleMultiAnswer(opt.label)"
+                  >
+                    <img
+                      v-if="opt.image"
+                      :src="mediaUrl(opt.image)"
+                      :alt="opt.label"
+                    />
+                    <span class="image-option-label">{{ opt.label }}</span>
+                  </button>
+                </div>
+              </div>
+
+              <!-- 多选题 -->
+              <div
+                v-else-if="currentQuestion.question_type === 'multiple_choice'"
+                class="text-options"
+              >
+                <p class="multi-hint">可多选</p>
+                <button
+                  v-for="opt in shownOptions(currentQuestion)"
+                  :key="opt.label"
+                  class="text-option-btn"
+                  :class="{ active: isMultiSelected(opt.label) }"
+                  @click="toggleMultiAnswer(opt.label)"
+                >
+                  {{ opt.label }}
+                </button>
+              </div>
+
+              <!-- 是否题 -->
+              <div
+                v-else-if="currentQuestion.question_type === 'yes_no'"
+                class="options yn-options"
+              >
+                <button
+                  class="option-btn yn-btn"
+                  :class="{ active: currentAnswer === '是' }"
+                  @click="selectAnswer('是')"
+                >
+                  是
+                </button>
+                <button
+                  class="option-btn yn-btn"
+                  :class="{ active: currentAnswer === '否' }"
+                  @click="selectAnswer('否')"
+                >
+                  否
+                </button>
+              </div>
+
+              <!-- 开放题 -->
+              <div
+                v-else-if="currentQuestion.question_type === 'open_text'"
+                class="open-text"
+              >
+                <textarea
+                  v-model="answersMap[currentQuestion.id]"
+                  placeholder="请在此输入您的回答..."
+                  rows="4"
+                ></textarea>
+              </div>
+            </template>
           </div>
 
-          <!-- 多选题 -->
-          <div
-            v-else-if="currentQuestion.question_type === 'multiple_choice'"
-            class="text-options"
-          >
-            <p class="multi-hint">可多选</p>
-            <button
-              v-for="opt in shownOptions(currentQuestion)"
-              :key="opt.label"
-              class="text-option-btn"
-              :class="{ active: isMultiSelected(opt.label) }"
-              @click="toggleMultiAnswer(opt.label)"
-            >
-              {{ opt.label }}
+          <!-- 快速作答警告 -->
+          <div v-if="showSpeedWarning" class="speed-warning">
+            <p>⚠️ 您的作答速度较快，请认真阅读题目后再作答。</p>
+            <button class="warning-confirm-btn" @click="goNext">
+              我已认真阅读，继续
             </button>
           </div>
 
-          <!-- 是否题 -->
-          <div
-            v-else-if="currentQuestion.question_type === 'yes_no'"
-            class="options yn-options"
-          >
+          <div class="nav-buttons" v-if="!showSpeedWarning && !keyTrialOn">
             <button
-              class="option-btn yn-btn"
-              :class="{ active: currentAnswer === '是' }"
-              @click="selectAnswer('是')"
+              v-if="!keyMode"
+              class="nav-btn secondary"
+              @click="prevQuestion"
+              :disabled="!prevVisible"
             >
-              是
+              上一题
             </button>
             <button
-              class="option-btn yn-btn"
-              :class="{ active: currentAnswer === '否' }"
-              @click="selectAnswer('否')"
+              class="nav-btn primary"
+              @click="nextQuestion"
+              :disabled="!hasAnswer() || submitting"
             >
-              否
+              {{
+                submitting
+                  ? "正在提交…"
+                  : isLastQuestion
+                    ? isBundle && unitIndex < units.length - 1 && !endsInvalid
+                      ? "提交这一份"
+                      : "提交问卷"
+                    : "下一题"
+              }}
             </button>
           </div>
-
-          <!-- 开放题 -->
+          <!-- 按键作答时没有提交按钮：提交失败了在这里重试 -->
           <div
-            v-else-if="currentQuestion.question_type === 'open_text'"
-            class="open-text"
+            v-if="keyTrialOn && (submitting || submitError)"
+            class="nav-buttons"
           >
-            <textarea
-              v-model="answersMap[currentQuestion.id]"
-              placeholder="请在此输入您的回答..."
-              rows="4"
-            ></textarea>
+            <button
+              class="nav-btn primary"
+              :disabled="submitting"
+              @click="submitQuestionnaire"
+            >
+              {{ submitting ? "正在提交…" : "重新提交" }}
+            </button>
           </div>
-        </div>
-
-        <!-- 快速作答警告 -->
-        <div v-if="showSpeedWarning" class="speed-warning">
-          <p>⚠️ 您的作答速度较快，请认真阅读题目后再作答。</p>
-          <button class="warning-confirm-btn" @click="goNext">
-            我已认真阅读，继续
-          </button>
-        </div>
-
-        <div class="nav-buttons" v-if="!showSpeedWarning">
-          <button
-            class="nav-btn secondary"
-            @click="prevQuestion"
-            :disabled="!prevVisible"
-          >
-            上一题
-          </button>
-          <button
-            class="nav-btn primary"
-            @click="nextQuestion"
-            :disabled="!hasAnswer() || submitting"
-          >
-            {{
-              submitting
-                ? "正在提交…"
-                : isLastQuestion
-                  ? isBundle && unitIndex < units.length - 1 && !endsInvalid
-                    ? "提交这一份"
-                    : "提交问卷"
-                  : "下一题"
-            }}
-          </button>
-        </div>
-        <p v-if="submitError" class="submit-error">{{ submitError }}</p>
+          <p v-if="submitError" class="submit-error">{{ submitError }}</p>
+        </template>
 
         <div class="exit-row">
           <button class="exit-btn" @click="confirmExit">退出作答</button>
@@ -1981,6 +2381,46 @@ const nextUnitInfo = computed(() => units.value[unitIndex.value + 1] || null);
   font-size: 12px;
   color: #8aaa94;
   margin: 6px 0 24px;
+}
+/* 按键作答：说明、练习 */
+.key-intro {
+  padding: 16px 0 8px;
+}
+.key-intro-title {
+  margin: 0 0 12px;
+  font-size: 17px;
+  font-weight: 600;
+  color: #2e4a38;
+  text-align: center;
+}
+.key-intro-list {
+  margin: 0 0 14px;
+  padding-left: 20px;
+  font-size: 14px;
+  line-height: 1.8;
+  color: #3d5a48;
+}
+.key-intro-note {
+  margin: 0 0 16px;
+  font-size: 13px;
+  color: #6b8a76;
+  text-align: center;
+  line-height: 1.7;
+}
+.practice-badge {
+  display: inline-block;
+  margin: 0 0 12px;
+  padding: 3px 10px;
+  border-radius: 12px;
+  background: #fff6e0;
+  color: #b5822a;
+  font-size: 12px;
+  font-weight: 600;
+}
+.key-other-tip {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: #9cb8a6;
 }
 .question-text {
   font-size: 16px;

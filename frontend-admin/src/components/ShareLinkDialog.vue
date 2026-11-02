@@ -18,6 +18,7 @@ const IS_DEV = import.meta.env.DEV;
 const linkHost = ref("localhost");
 const lanIps = ref([]);
 const groupName = ref("");
+const answerMode = ref(""); // 答题方式：空 = 按问卷设置，click = 点击作答，key = 按键作答
 const generatedLink = ref("");
 const qrDataUrl = ref(""); // 二维码图片（base64）
 
@@ -42,9 +43,11 @@ async function generate() {
   const base = IS_DEV
     ? `http://${linkHost.value}:5173${props.path}`
     : `${window.location.origin}${props.path}`;
-  generatedLink.value = groupName.value
-    ? `${base}?group=${encodeURIComponent(groupName.value)}`
-    : base;
+  const params = new URLSearchParams();
+  if (groupName.value) params.set("group", groupName.value);
+  if (answerMode.value) params.set("mode", answerMode.value);
+  const query = params.toString();
+  generatedLink.value = query ? `${base}?${query}` : base;
   // 链接变了，二维码跟着重新生成
   qrDataUrl.value = await QRCode.toDataURL(generatedLink.value, {
     width: 240,
@@ -55,6 +58,7 @@ async function generate() {
 watch(visible, async (open) => {
   if (!open) return;
   groupName.value = "";
+  answerMode.value = "";
   if (IS_DEV) await fetchLanIps();
   generate();
 });
@@ -64,7 +68,7 @@ function downloadQrCode() {
   a.href = qrDataUrl.value;
   a.download = `${props.fileName}${
     groupName.value ? "_" + groupName.value : ""
-  }_二维码.png`;
+  }${answerMode.value === "key" ? "_按键作答" : ""}_二维码.png`;
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -104,6 +108,16 @@ function copyLink() {
             @input="generate"
             clearable
           />
+        </el-form-item>
+        <el-form-item label="答题方式">
+          <el-radio-group v-model="answerMode" @change="generate">
+            <el-radio value="">按问卷设置</el-radio>
+            <el-radio value="click">点击作答</el-radio>
+            <el-radio value="key">按键作答</el-radio>
+          </el-radio-group>
+          <div class="mode-tip">
+            同一份问卷可以发两种链接：电脑上用按键作答（记录按键时长），手机上用点击作答。
+          </div>
         </el-form-item>
       </el-form>
 
@@ -221,5 +235,10 @@ function copyLink() {
   padding: 1px 6px;
   border-radius: 4px;
   color: #666;
+}
+.mode-tip {
+  font-size: 12px;
+  color: #999;
+  line-height: 1.5;
 }
 </style>

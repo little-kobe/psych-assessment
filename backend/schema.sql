@@ -4,9 +4,11 @@
 -- 包含 2026-10 第8轮新增的：norms 表；bundles.consent_text/shuffle、submissions.bundle_id/bundle_token/bundle_position、
 -- questionnaires.total_formula/norm_in_report、questions.media 列
 -- 包含 2026-10 第12轮新增的：questions.logic、submissions.is_invalid 列
+-- 包含 2026-10 第13轮新增的：questionnaires.answer_mode/key_practice/key_confidence、submissions.answer_mode、
+-- answers.rt_ms/hold_ms/input_method/confidence 列
 -- 用法（新电脑建库）：mysql -u root -p < schema.sql
 --   只会新建不存在的表，不会删除或覆盖已有数据；建好表后运行 backend/createAdmin.js 创建初始账号
--- 已有数据库升级：不要用这个文件，按数字从小到大执行 backend/sql/ 里的 round4、round5 … round12 文件
+-- 已有数据库升级：不要用这个文件，按数字从小到大执行 backend/sql/ 里的 round4、round5 … round13 文件
 
 CREATE DATABASE IF NOT EXISTS `psych_assessment` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
 USE `psych_assessment`;
@@ -32,6 +34,10 @@ CREATE TABLE IF NOT EXISTS `answers` (
   `answer_value` int DEFAULT NULL COMMENT '数值类答案，量表题用',
   `duration_ms` int DEFAULT NULL COMMENT '这道题的作答耗时，毫秒',
   `answer_text` text CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci COMMENT '文字类答案，多选题存JSON数组，开放题存文字',
+  `rt_ms` int NULL DEFAULT NULL COMMENT '按下用时：题目出现到按下按键的毫秒数',
+  `hold_ms` int NULL DEFAULT NULL COMMENT '按住时长：按下到松开的毫秒数',
+  `input_method` varchar(10) NULL DEFAULT NULL COMMENT '作答输入：key 键盘，touch 触屏',
+  `confidence` tinyint NULL DEFAULT NULL COMMENT '受测者报告的把握程度 1-5',
   PRIMARY KEY (`id`) USING BTREE,
   KEY `submission_id` (`submission_id`) USING BTREE,
   KEY `question_id` (`question_id`) USING BTREE,
@@ -138,6 +144,9 @@ CREATE TABLE IF NOT EXISTS `questionnaires` (
   `show_report_chart` tinyint(1) DEFAULT '0' COMMENT '答完后是否向受测者展示维度得分图表',
   `total_formula` varchar(20) NULL DEFAULT 'dimensions' COMMENT '总分算法：dimensions 各维度相加，items_sum / items_mean 维度里的题每题只算一次',
   `norm_in_report` tinyint(1) NULL DEFAULT 0 COMMENT '受测者结果图表里是否显示常模平均',
+  `answer_mode` varchar(10) NOT NULL DEFAULT 'click' COMMENT '答题方式：click 点击，key 按键（记录按住时长）',
+  `key_practice` tinyint NOT NULL DEFAULT 3 COMMENT '按键作答前的练习题数量，0 表示不练习',
+  `key_confidence` tinyint(1) NOT NULL DEFAULT 0 COMMENT '按键作答时每题答完后是否询问把握程度（1-5）',
   PRIMARY KEY (`id`) USING BTREE,
   KEY `created_by` (`created_by`) USING BTREE,
   CONSTRAINT `questionnaires_ibfk_1` FOREIGN KEY (`created_by`) REFERENCES `admins` (`id`) ON DELETE RESTRICT ON UPDATE RESTRICT
@@ -226,6 +235,7 @@ CREATE TABLE IF NOT EXISTS `submissions` (
   `bundle_token` varchar(40) NULL DEFAULT NULL COMMENT '同一个人在一次组合作答中的几份问卷共用这个标记',
   `bundle_position` int NULL DEFAULT NULL COMMENT '这份问卷是他在组合里作答的第几份',
   `is_invalid` tinyint(1) NOT NULL DEFAULT 0 COMMENT '1 = 被跳题逻辑判为无效答卷',
+  `answer_mode` varchar(10) NULL DEFAULT NULL COMMENT '这份答卷的答题方式：click / key',
   PRIMARY KEY (`id`) USING BTREE,
   KEY `questionnaire_id` (`questionnaire_id`) USING BTREE,
   KEY `bundle_token` (`bundle_token`),

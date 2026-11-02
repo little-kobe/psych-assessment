@@ -684,6 +684,7 @@ app.post("/api/submission", async (req, res) => {
     bundle_token,
     bundle_position,
     subject_info,
+    answer_mode,
   } = req.body;
 
   const connection = await mysql.createConnection(dbConfig);
@@ -737,7 +738,7 @@ app.post("/api/submission", async (req, res) => {
     }
 
     const [submissionResult] = await connection.execute(
-      "INSERT INTO submissions (questionnaire_id, started_at, finished_at, tracking_code, group_label, bundle_id, bundle_token, bundle_position, is_invalid) VALUES (?, DATE_SUB(NOW(), INTERVAL ? SECOND), NOW(), ?, ?, ?, ?, ?, ?)",
+      "INSERT INTO submissions (questionnaire_id, started_at, finished_at, tracking_code, group_label, bundle_id, bundle_token, bundle_position, is_invalid, answer_mode) VALUES (?, DATE_SUB(NOW(), INTERVAL ? SECOND), NOW(), ?, ?, ?, ?, ?, ?, ?)",
       [
         questionnaire_id,
         durationSec,
@@ -747,6 +748,7 @@ app.post("/api/submission", async (req, res) => {
         bundleToken,
         bundlePosition,
         isInvalid,
+        answer_mode === "key" ? "key" : "click",
       ],
     );
     const submissionId = submissionResult.insertId;
@@ -768,15 +770,33 @@ app.post("/api/submission", async (req, res) => {
       }
     }
 
+    // 按键作答的数据：按下用时、按住时长（毫秒，0~10 分钟内的整数）、输入方式、把握程度（1-5）
+    const msOrNull = (v) => {
+      const n = Math.round(Number(v));
+      return v !== null &&
+        v !== undefined &&
+        Number.isFinite(n) &&
+        n >= 0 &&
+        n <= 600000
+        ? n
+        : null;
+    };
     for (const ans of answerList) {
+      const conf = Math.round(Number(ans.confidence));
       await connection.execute(
-        "INSERT INTO answers (submission_id, question_id, answer_value, answer_text, duration_ms) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO answers (submission_id, question_id, answer_value, answer_text, duration_ms, rt_ms, hold_ms, input_method, confidence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
           submissionId,
           ans.question_id,
           ans.answer_value !== undefined ? ans.answer_value : null,
           ans.answer_text || null,
-          ans.duration_ms,
+          ans.duration_ms ?? null,
+          msOrNull(ans.rt_ms),
+          msOrNull(ans.hold_ms),
+          ans.input_method === "key" || ans.input_method === "touch"
+            ? ans.input_method
+            : null,
+          conf >= 1 && conf <= 5 ? conf : null,
         ],
       );
     }
@@ -1702,11 +1722,16 @@ app.get(
       const infoHeaders = infoFields.map((f) => f.field_label);
       // 有被跳题逻辑判为无效的答卷时，加一列「答卷状态」，方便筛掉
       const hasInvalid = submissions.some((s) => s.is_invalid);
+      // 有按键作答的答卷时，加一列「答题方式」，另外附一个「按键数据」表（每题一行）
+      const hasKey =
+        submissions.some((s) => s.answer_mode === "key") ||
+        answers.some((a) => a.hold_ms !== null && a.hold_ms !== undefined);
       const fixedHeaders = [
         "提交ID",
         "追踪码",
         "分组",
         ...(hasInvalid ? ["答卷状态"] : []),
+        ...(hasKey ? ["答题方式"] : []),
         ...infoHeaders,
         "开始时间",
         "完成时间",
@@ -1802,6 +1827,7 @@ app.get(
           sub.tracking_code || "",
           sub.group_label || "",
           ...(hasInvalid ? [sub.is_invalid ? "无效（跳题逻辑）" : "有效"] : []),
+          ...(hasKey ? [sub.answer_mode === "key" ? "按键" : "点击"] : []),
           ...infoCols,
           sub.started_at
             ? new Date(sub.started_at).toLocaleString("zh-CN")
@@ -1886,6 +1912,58 @@ app.get(
         else if (index < fixedColCount + questions.length * 2) col.width = 14;
         else col.width = 16;
       });
+
+      // 按键数据：每份答卷的每道题一行（长格式），方便做混合效应模型等逐题分析
+      if (hasKey) {
+        const keySheet = workbook.addWorksheet("按键数据（每题一行）");
+        const hasConf = answers.some(
+          (a) => a.confidence !== null && a.confidence !== undefined,
+        );
+        keySheet.addRow([
+          "提交ID",
+          "追踪码",
+          "分组",
+          ...infoHeaders,
+          "题号",
+          "题目",
+          "答案",
+          "按下用时(ms)",
+          "按住时长(ms)",
+          ...(hasConf ? ["把握程度(1-5)"] : []),
+          "作答输入",
+          "这题总用时(ms)",
+        ]);
+        keySheet.getRow(1).font = { bold: true };
+        keySheet.getRow(1).fill = headerRow.fill;
+        const inputName = { key: "键盘", touch: "触屏" };
+        submissions
+          .filter((sub) => sub.answer_mode === "key")
+          .forEach((sub) => {
+            const subAnswers = answerMap[sub.id] || {};
+            const subInfo = subjectInfoMap[sub.id] || {};
+            questions.forEach((q) => {
+              const ans = subAnswers[q.id];
+              if (!ans) return; // 没显示（被跳过）的题不列
+              keySheet.addRow([
+                sub.id,
+                sub.tracking_code || "",
+                sub.group_label || "",
+                ...infoFields.map((f) => subInfo[f.field_key] || ""),
+                q.order_num,
+                q.content,
+                exportAnswerCell(ans, q),
+                ans.rt_ms ?? "",
+                ans.hold_ms ?? "",
+                ...(hasConf ? [ans.confidence ?? ""] : []),
+                inputName[ans.input_method] || "点击",
+                ans.duration_ms ?? "",
+              ]);
+            });
+          });
+        keySheet.columns.forEach((col, i) => {
+          col.width = i === 4 + infoHeaders.length ? 36 : 14;
+        });
+      }
 
       // 第二个工作表：题目与选项对照（说明每个分数对应哪个选项文字）
       const codeSheet = workbook.addWorksheet("题目与选项对照");
@@ -1987,6 +2065,9 @@ app.put("/api/questionnaires/:id", verifyAdminToken, async (req, res) => {
     expires_at,
     is_active,
     show_report_chart,
+    answer_mode,
+    key_practice,
+    key_confidence,
   } = req.body;
 
   if (!title) {
@@ -2017,8 +2098,26 @@ app.put("/api/questionnaires/:id", verifyAdminToken, async (req, res) => {
         .json({ success: false, message: "没有权限编辑此问卷" });
     }
 
+    // 答题方式（按键作答的设置）：没传就保持原样
+    const old = qRows[0];
+    const mode =
+      answer_mode === "key" || answer_mode === "click"
+        ? answer_mode
+        : old.answer_mode || "click";
+    const practice =
+      key_practice === undefined || key_practice === null
+        ? (old.key_practice ?? 3)
+        : Math.max(0, Math.min(5, Math.round(Number(key_practice)) || 0));
+    const confidence =
+      key_confidence === undefined
+        ? old.key_confidence
+          ? 1
+          : 0
+        : key_confidence
+          ? 1
+          : 0;
     await connection.execute(
-      "UPDATE questionnaires SET title = ?, description = ?, consent_text = ?, track_timing = ?, max_responses = ?, expires_at = ?, is_active = ?, show_report_chart = ? WHERE id = ?",
+      "UPDATE questionnaires SET title = ?, description = ?, consent_text = ?, track_timing = ?, max_responses = ?, expires_at = ?, is_active = ?, show_report_chart = ?, answer_mode = ?, key_practice = ?, key_confidence = ? WHERE id = ?",
       [
         title,
         description || "",
@@ -2028,6 +2127,9 @@ app.put("/api/questionnaires/:id", verifyAdminToken, async (req, res) => {
         expires_at || null,
         is_active !== false,
         show_report_chart ? 1 : 0,
+        mode,
+        practice,
+        confidence,
         questionnaireId,
       ],
     );
@@ -2842,6 +2944,10 @@ app.get(
           answer_value: ans.answer_value,
           answer_text: ans.answer_text,
           duration_ms: ans.duration_ms,
+          rt_ms: ans.rt_ms,
+          hold_ms: ans.hold_ms,
+          input_method: ans.input_method,
+          confidence: ans.confidence,
         };
       });
 
