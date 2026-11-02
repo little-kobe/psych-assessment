@@ -1,14 +1,41 @@
 <script setup>
-// 后台的整体布局：左侧菜单（问卷管理、问卷组合、账号管理）+ 右侧内容。登录页不用这个布局。
-import { computed } from "vue";
+// 后台的整体布局：左侧菜单（问卷管理、问卷组合、账号管理）+ 右侧（顶栏 + 内容）。登录页不用这个布局。
+// 顶栏左边一句话说明「当前账号能看到什么」，右边是账号菜单（修改密码、账号管理、退出登录）。
+import { ref, computed, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { Document, Files, User, SwitchButton } from "@element-plus/icons-vue";
+import { ElMessage, ElMessageBox } from "element-plus";
+import { API_BASE } from "../api.js";
+import {
+  Document,
+  Files,
+  User,
+  Lock,
+  EditPen,
+  SwitchButton,
+  ArrowDown,
+} from "@element-plus/icons-vue";
+import ChangePasswordDialog from "./ChangePasswordDialog.vue";
+import {
+  me,
+  ROLE_NAMES,
+  currentRole,
+  currentName,
+  clearSession,
+  loadMe,
+} from "../session.js";
 
 const route = useRoute();
 const router = useRouter();
 
-const displayName = computed(() => localStorage.getItem("admin_name") || "");
-const role = computed(() => localStorage.getItem("admin_role") || "");
+const role = computed(() => currentRole());
+const displayName = computed(() => currentName());
+
+onMounted(async () => {
+  // 读一次服务器上的账号信息（角色可能被总账号改过）；登录过期就回登录页
+  if ((await loadMe()) === "unauthorized") {
+    router.push({ path: "/login", query: { redirect: route.fullPath } });
+  }
+});
 
 const menu = computed(() => [
   {
@@ -27,11 +54,11 @@ const menu = computed(() => [
     to: "/bundles",
     match: (p) => p.startsWith("/bundle"),
   },
-  ...(role.value === "supervisor"
+  ...(role.value === "admin" || role.value === "supervisor"
     ? [
         {
           key: "admins",
-          label: "账号管理",
+          label: role.value === "admin" ? "账号管理" : "我的研究者",
           icon: User,
           to: "/admin-manage",
           match: (p) => p.startsWith("/admin-manage"),
@@ -40,11 +67,68 @@ const menu = computed(() => [
     : []),
 ]);
 
-function logout() {
-  localStorage.removeItem("admin_token");
-  localStorage.removeItem("admin_role");
-  localStorage.removeItem("admin_name");
-  router.push("/login");
+// 顶栏左边：这个账号能看到哪些数据
+const scopeText = computed(() => {
+  const m = me.value;
+  if (role.value === "admin") return "可以看到所有问卷，管理所有账号";
+  if (role.value === "supervisor") {
+    return m
+      ? `可以看到自己和名下 ${m.member_count} 位研究者的问卷`
+      : "可以看到自己和名下研究者的问卷";
+  }
+  if (role.value === "researcher") {
+    return m?.supervisor_name
+      ? `可以看到自己的问卷 · 导师：${m.supervisor_name}`
+      : "可以看到自己的问卷";
+  }
+  return "";
+});
+
+const showPassword = ref(false);
+
+async function editName() {
+  let value;
+  try {
+    ({ value } = await ElMessageBox.prompt(
+      "显示在页面右上角和问卷「创建人」里",
+      "修改姓名",
+      {
+        inputValue: displayName.value,
+        inputValidator: (v) => (!!v && !!v.trim()) || "姓名不能为空",
+        confirmButtonText: "保存",
+        cancelButtonText: "取消",
+      },
+    ));
+  } catch {
+    return; // 取消
+  }
+  try {
+    const res = await fetch(`${API_BASE}/api/admin/me`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${localStorage.getItem("admin_token")}`,
+      },
+      body: JSON.stringify({ display_name: value.trim() }),
+    });
+    const data = await res.json();
+    if (data.success) {
+      ElMessage.success("已保存");
+      loadMe();
+    } else ElMessage.error(data.message || "保存失败");
+  } catch {
+    ElMessage.error("保存失败，请检查后端服务");
+  }
+}
+
+function onUserCommand(cmd) {
+  if (cmd === "name") editName();
+  if (cmd === "password") showPassword.value = true;
+  if (cmd === "admins") router.push("/admin-manage");
+  if (cmd === "logout") {
+    clearSession();
+    router.push("/login");
+  }
 }
 </script>
 
@@ -84,26 +168,77 @@ function logout() {
           <span>{{ m.label }}</span>
         </router-link>
       </nav>
-
-      <div class="user">
-        <div class="avatar">{{ (displayName || "我").slice(0, 1) }}</div>
-        <div class="user-text">
-          <div class="user-name">{{ displayName || "未命名账号" }}</div>
-          <div class="user-role">
-            {{ role === "supervisor" ? "导师" : "研究者" }}
-          </div>
-        </div>
-        <el-tooltip content="退出登录" placement="top">
-          <button class="logout" type="button" @click="logout">
-            <el-icon :size="16"><SwitchButton /></el-icon>
-          </button>
-        </el-tooltip>
-      </div>
     </aside>
 
-    <main class="main">
-      <slot />
-    </main>
+    <div class="right">
+      <header class="topbar">
+        <div class="scope" v-if="role">
+          <span class="role-badge" :class="role">{{
+            ROLE_NAMES[role] || role
+          }}</span>
+          <span class="scope-text">{{ scopeText }}</span>
+        </div>
+        <el-dropdown
+          trigger="click"
+          placement="bottom-end"
+          @command="onUserCommand"
+        >
+          <button type="button" class="user-chip">
+            <span class="avatar">{{ (displayName || "我").slice(0, 1) }}</span>
+            <span class="user-name">{{ displayName || "我的账号" }}</span>
+            <el-icon class="caret"><ArrowDown /></el-icon>
+          </button>
+          <template #dropdown>
+            <div class="user-card">
+              <span class="avatar big">{{
+                (displayName || "我").slice(0, 1)
+              }}</span>
+              <div class="user-card-text">
+                <div class="user-card-name">{{ displayName }}</div>
+                <div class="user-card-sub">
+                  {{ me?.username ? `账号 ${me.username}` : "" }}
+                  <span class="role-badge small" :class="role">{{
+                    ROLE_NAMES[role] || role
+                  }}</span>
+                </div>
+                <div v-if="role === 'researcher'" class="user-card-sub">
+                  导师：{{ me?.supervisor_name || "未分配" }}
+                </div>
+              </div>
+            </div>
+            <el-dropdown-menu>
+              <el-dropdown-item command="name" :icon="EditPen"
+                >修改姓名</el-dropdown-item
+              >
+              <el-dropdown-item command="password" :icon="Lock"
+                >修改密码</el-dropdown-item
+              >
+              <el-dropdown-item
+                v-if="role === 'admin' || role === 'supervisor'"
+                command="admins"
+                :icon="User"
+                >{{
+                  role === "admin" ? "账号管理" : "我的研究者"
+                }}</el-dropdown-item
+              >
+              <el-dropdown-item
+                command="logout"
+                :icon="SwitchButton"
+                divided
+                class="logout-item"
+                >退出登录</el-dropdown-item
+              >
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+      </header>
+
+      <main class="main">
+        <slot />
+      </main>
+    </div>
+
+    <ChangePasswordDialog v-model="showPassword" />
   </div>
 </template>
 
@@ -184,19 +319,93 @@ function logout() {
   font-weight: 600;
   box-shadow: 0 2px 8px rgba(184, 130, 30, 0.12);
 }
-.user {
+
+.right {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  height: 56px;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 12px 8px 4px;
-  border-top: 1px solid #f0e2c4;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 32px;
+  background: rgba(247, 244, 238, 0.88);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--app-border);
+}
+.scope {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--app-text-3);
+}
+.scope-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.role-badge {
+  flex-shrink: 0;
+  font-size: 12px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-weight: 600;
+  background: #f3ede3;
+  color: var(--app-text-2);
+}
+.role-badge.admin {
+  background: #fdebd9;
+  color: #a0481b;
+}
+.role-badge.supervisor {
+  background: #e7f0fb;
+  color: #2f5d8a;
+}
+.role-badge.researcher {
+  background: #e8f5ec;
+  color: #2f7d4f;
+}
+.role-badge.small {
+  font-size: 11px;
+  padding: 0 8px;
+  margin-left: 6px;
+}
+.user-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 10px 0 4px;
+  border: 1px solid var(--app-border);
+  border-radius: 999px;
+  background: #fff;
+  cursor: pointer;
+  font: inherit;
+  color: var(--app-text);
+  transition:
+    box-shadow 0.15s,
+    border-color 0.15s;
+  flex-shrink: 0;
+}
+.user-chip:hover {
+  border-color: #e4cfae;
+  box-shadow: 0 2px 8px rgba(184, 130, 30, 0.12);
 }
 .avatar {
   width: 32px;
   height: 32px;
   border-radius: 50%;
-  background: #f4d9b0;
-  color: #8b5a2b;
+  background: linear-gradient(135deg, #fbb034, #f4844c);
+  color: #fff;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -204,40 +413,45 @@ function logout() {
   font-weight: 600;
   flex-shrink: 0;
 }
-.user-text {
-  flex: 1;
-  min-width: 0;
+.avatar.big {
+  width: 42px;
+  height: 42px;
+  font-size: 17px;
 }
 .user-name {
-  font-size: 13px;
-  color: var(--app-text);
+  font-size: 14px;
+  max-width: 140px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.user-role {
-  font-size: 11px;
+.caret {
   color: var(--app-text-3);
+  font-size: 12px;
 }
-.logout {
-  border: none;
-  background: transparent;
-  color: var(--app-text-3);
-  width: 30px;
-  height: 30px;
-  border-radius: 8px;
-  cursor: pointer;
+.user-card {
   display: flex;
+  gap: 12px;
   align-items: center;
-  justify-content: center;
+  padding: 14px 16px 12px;
+  min-width: 230px;
+  border-bottom: 1px solid #f0ebe2;
 }
-.logout:hover {
-  background: rgba(200, 90, 34, 0.1);
-  color: var(--el-color-primary);
+.user-card-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--app-text);
+}
+.user-card-sub {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--app-text-3);
+}
+:deep(.logout-item) {
+  color: #c0392b;
 }
 .main {
   flex: 1;
-  min-width: 0;
   padding: 24px 32px 48px;
 }
 
@@ -269,19 +483,17 @@ function logout() {
   .menu-item {
     padding: 8px 10px;
   }
-  .user {
-    border-top: none;
-    padding: 0;
-  }
-  .user-text {
-    display: none;
+  .topbar {
+    padding: 0 16px;
   }
   .main {
     padding: 16px 16px 40px;
   }
 }
 @media (max-width: 560px) {
-  .brand-text {
+  .brand-text,
+  .user-name,
+  .scope-text {
     display: none;
   }
   .menu {

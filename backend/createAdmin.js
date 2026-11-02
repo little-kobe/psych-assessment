@@ -1,5 +1,6 @@
 // backend/createAdmin.js
-// 一次性脚本：创建一个导师账号（超级管理员）和一个研究者账号（普通权限），运行一次即可
+// 一次性脚本：创建一个总账号（管理所有人）和一个研究者账号（普通权限），运行一次即可
+// 导师账号登录后台后在「账号管理」里新建
 
 const mysql = require("mysql2/promise");
 const envFile = require("path").join(__dirname, ".env");
@@ -16,11 +17,11 @@ const dbConfig = {
 async function createAdmins() {
   const connection = await mysql.createConnection(dbConfig);
 
-  // 导师账号：超级管理员，能看所有人的数据
+  // 总账号：能看所有人的数据，管理所有账号
   const supervisorHash = await bcrypt.hash("supervisor123456", 10);
   await connection.execute(
     "INSERT INTO admins (username, password_hash, display_name, role) VALUES (?, ?, ?, ?)",
-    ["supervisor", supervisorHash, "导师账号", "supervisor"],
+    ["supervisor", supervisorHash, "总账号", "admin"],
   );
 
   // 普通研究者账号：只能看自己创建的数据
@@ -32,7 +33,7 @@ async function createAdmins() {
 
   await connection.end();
   console.log("两个账号创建成功：");
-  console.log("导师账号 - 用户名: supervisor，密码: supervisor123456");
+  console.log("总账号 - 用户名: supervisor，密码: supervisor123456");
   console.log("研究者账号 - 用户名: researcher1，密码: researcher123456");
   console.log("上线后请马上用 tools/set-password.js 把这两个默认密码改掉");
 }

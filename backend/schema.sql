@@ -6,9 +6,10 @@
 -- 包含 2026-10 第12轮新增的：questions.logic、submissions.is_invalid 列
 -- 包含 2026-10 第13轮新增的：questionnaires.answer_mode/key_practice/key_confidence、submissions.answer_mode、
 -- answers.rt_ms/hold_ms/input_method/confidence 列
+-- 包含 2026-11 第16轮新增的：admins.supervisor_id 列（账号分 总账号 admin / 导师 supervisor / 研究者 researcher）
 -- 用法（新电脑建库）：mysql -u root -p < schema.sql
 --   只会新建不存在的表，不会删除或覆盖已有数据；建好表后运行 backend/createAdmin.js 创建初始账号
--- 已有数据库升级：不要用这个文件，按数字从小到大执行 backend/sql/ 里的 round4、round5 … round13 文件
+-- 已有数据库升级：不要用这个文件，按数字从小到大执行 backend/sql/ 里的 round4、round5 … round16 文件
 
 CREATE DATABASE IF NOT EXISTS `psych_assessment` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
 USE `psych_assessment`;
@@ -21,10 +22,13 @@ CREATE TABLE IF NOT EXISTS `admins` (
   `username` varchar(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '管理员账号',
   `password_hash` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci NOT NULL COMMENT '密码，加密存储',
   `display_name` varchar(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT NULL COMMENT '显示名称',
-  `role` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT 'researcher' COMMENT '角色：researcher普通研究者，supervisor导师/超级管理员',
+  `role` varchar(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci DEFAULT 'researcher' COMMENT '角色：admin 总账号（管理所有人），supervisor 导师（管理名下研究者），researcher 研究者',
+  `supervisor_id` int NULL DEFAULT NULL COMMENT '研究者所属的导师（admins.id）；导师和总账号为空',
   `created_at` datetime DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`) USING BTREE,
-  UNIQUE KEY `username` (`username`) USING BTREE
+  UNIQUE KEY `username` (`username`) USING BTREE,
+  KEY `supervisor_id` (`supervisor_id`),
+  CONSTRAINT `admins_supervisor_fk` FOREIGN KEY (`supervisor_id`) REFERENCES `admins` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci ROW_FORMAT=DYNAMIC;
 -- answers
 CREATE TABLE IF NOT EXISTS `answers` (

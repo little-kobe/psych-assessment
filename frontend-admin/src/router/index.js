@@ -26,7 +26,13 @@ const routes = [
   { path: "/bundles", name: "bundles", component: BundleList },
   { path: "/bundle/:id", name: "bundleEdit", component: BundleEdit },
   { path: "/import", name: "import", component: ImportQuestions },
-  { path: "/admin-manage", name: "adminManage", component: AdminManage },
+  // 账号管理：总账号管理所有账号，导师管理名下研究者；研究者进不来
+  {
+    path: "/admin-manage",
+    name: "adminManage",
+    component: AdminManage,
+    meta: { roles: ["admin", "supervisor"] },
+  },
   // 一份问卷的各个页面：上面是问卷标题、常用操作和标签页，下面切换具体内容
   {
     path: "/questionnaire/:id",
@@ -77,6 +83,13 @@ router.beforeEach((to) => {
   if (to.meta.public) return true;
   if (!localStorage.getItem("admin_token")) {
     return { path: "/login", query: { redirect: to.fullPath } };
+  }
+  // 只有某些角色能进的页面（角色以登录时 / 每次进后台时读到的为准，后端也会再检查）
+  if (
+    to.meta.roles &&
+    !to.meta.roles.includes(localStorage.getItem("admin_role"))
+  ) {
+    return { path: "/" };
   }
   return true;
 });

@@ -74,8 +74,79 @@ if (IS_PRODUCTION && !process.env.JWT_SECRET) {
   console.error("上线环境必须在 .env 里设置 JWT_SECRET");
   process.exit(1);
 }
+// ========== 账号和权限 ==========
+// 账号分三级：
+//   admin 总账号：看到、管理所有问卷、问卷组合和所有账号
+//   supervisor 导师：看到、管理自己和名下研究者的问卷、问卷组合；只管理自己名下的研究者
+//   researcher 研究者：只看自己的
+const ROLE_NAMES = {
+  admin: "总账号",
+  supervisor: "导师",
+  researcher: "研究者",
+};
+
+// 每次请求都按数据库里的账号信息判断权限（改了角色、分配了导师马上生效；账号删了就不能再用）。
+// 同一个账号 15 秒内的请求用缓存，账号有改动时清空缓存。
+const accountCache = new Map();
+function clearAccountCache() {
+  accountCache.clear();
+}
+async function loadAccount(id) {
+  const hit = accountCache.get(id);
+  if (hit && Date.now() - hit.at < 15000) return hit.info;
+  const connection = await mysql.createConnection(dbConfig);
+  try {
+    const [rows] = await connection.execute(
+      "SELECT id, username, display_name, role, supervisor_id FROM admins WHERE id = ?",
+      [id],
+    );
+    if (rows.length === 0) {
+      accountCache.delete(id);
+      return null;
+    }
+    const a = rows[0];
+    // ownerIds：这个账号能管理哪些人创建的问卷、组合（总账号不用这个，全部都能管）
+    let ownerIds = [a.id];
+    if (a.role === "supervisor") {
+      const [members] = await connection.execute(
+        "SELECT id FROM admins WHERE supervisor_id = ? AND role = 'researcher'",
+        [a.id],
+      );
+      ownerIds = ownerIds.concat(members.map((m) => m.id));
+    }
+    const info = {
+      adminId: a.id,
+      username: a.username,
+      displayName: a.display_name,
+      role: a.role,
+      supervisorId: a.supervisor_id,
+      ownerIds,
+    };
+    accountCache.set(id, { at: Date.now(), info });
+    return info;
+  } finally {
+    await connection.end();
+  }
+}
+
+// 当前账号能不能管理某人（ownerId）创建的问卷、组合
+function canManageOwner(admin, ownerId) {
+  if (admin.role === "admin") return true;
+  if (ownerId === null || ownerId === undefined) return false;
+  return admin.ownerIds.includes(Number(ownerId));
+}
+
+// 列表查询用的条件：总账号不加条件，其他人只看 ownerIds 里的人创建的
+function ownerFilter(admin, column) {
+  if (admin.role === "admin") return { sql: "", params: [] };
+  return {
+    sql: `${column} IN (${admin.ownerIds.map(() => "?").join(", ")})`,
+    params: admin.ownerIds,
+  };
+}
+
 // 验证管理员登录令牌的中间件，挂在需要登录才能访问的接口前面
-function verifyAdminToken(req, res, next) {
+async function verifyAdminToken(req, res, next) {
   const authHeader = req.headers.authorization; // 前端会把token放在请求头里传过来
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     return res
@@ -84,18 +155,31 @@ function verifyAdminToken(req, res, next) {
   }
 
   const token = authHeader.split(" ")[1];
-
+  let decoded;
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    req.admin = decoded; // 把解码后的信息（adminId, username, role）挂在req上，后面的接口能直接用
-    next();
+    decoded = jwt.verify(token, JWT_SECRET);
   } catch (err) {
     return res
       .status(401)
       .json({ success: false, message: "登录已过期，请重新登录" });
   }
+  let account;
+  try {
+    account = await loadAccount(decoded.adminId);
+  } catch (err) {
+    console.error("读取账号失败:", err);
+    return res.status(500).json({ success: false, message: "服务器错误" });
+  }
+  if (!account) {
+    return res
+      .status(401)
+      .json({ success: false, message: "账号不存在或已被删除，请重新登录" });
+  }
+  // 挂在 req 上，后面的接口直接用：adminId、username、displayName、role、supervisorId、ownerIds
+  req.admin = account;
+  next();
 }
-// 权限检查中间件：研究者只能操作自己创建的问卷（以及其中的题目、提交记录），导师不受限制
+// 权限检查中间件：只能操作自己能管理的问卷（以及其中的题目、提交记录）：总账号全部，导师自己和名下研究者的，研究者自己的
 // kind：questionnaire（地址里的 :id 是问卷）、question（:id 是题目）、submission（:id 是提交记录）
 function requireAccess(kind) {
   return async (req, res, next) => {
@@ -1488,33 +1572,19 @@ app.get("/api/questionnaires", verifyAdminToken, async (req, res) => {
   try {
     const connection = await mysql.createConnection(dbConfig);
 
-    let sql, params;
-    if (req.admin.role === "supervisor") {
-      // 导师：查所有问卷，顺带查出创建者姓名方便前端展示
-      sql = `
+    // 总账号看所有问卷；导师看自己和名下研究者的；研究者只看自己的
+    const f = ownerFilter(req.admin, "q.created_by");
+    const sql = `
         SELECT q.*, a.display_name AS creator_name,
           (SELECT COUNT(*) FROM questions WHERE questionnaire_id = q.id) AS question_count,
           (SELECT COUNT(*) FROM submissions WHERE questionnaire_id = q.id) AS submission_count,
           (SELECT MAX(finished_at) FROM submissions WHERE questionnaire_id = q.id) AS last_submitted_at
         FROM questionnaires q
         LEFT JOIN admins a ON q.created_by = a.id
+        ${f.sql ? `WHERE ${f.sql}` : ""}
         ORDER BY q.created_at DESC
       `;
-      params = [];
-    } else {
-      // 普通研究者：只查自己创建的
-      sql = `
-        SELECT q.*, a.display_name AS creator_name,
-          (SELECT COUNT(*) FROM questions WHERE questionnaire_id = q.id) AS question_count,
-          (SELECT COUNT(*) FROM submissions WHERE questionnaire_id = q.id) AS submission_count,
-          (SELECT MAX(finished_at) FROM submissions WHERE questionnaire_id = q.id) AS last_submitted_at
-        FROM questionnaires q
-        LEFT JOIN admins a ON q.created_by = a.id
-        WHERE q.created_by = ?
-        ORDER BY q.created_at DESC
-      `;
-      params = [req.admin.adminId];
-    }
+    const params = f.params;
 
     const [rows] = await connection.execute(sql, params);
     await connection.end();
@@ -1580,10 +1650,7 @@ app.get("/api/questionnaires/:id", verifyAdminToken, async (req, res) => {
     const questionnaire = qRows[0];
 
     // 权限检查：普通研究者只能看自己创建的问卷详情
-    if (
-      req.admin.role !== "supervisor" &&
-      questionnaire.created_by !== req.admin.adminId
-    ) {
+    if (!canManageOwner(req.admin, questionnaire.created_by)) {
       await connection.end();
       return res
         .status(403)
@@ -1634,10 +1701,7 @@ app.get(
         return res.status(404).json({ success: false, message: "问卷不存在" });
       }
       const questionnaire = qRows[0];
-      if (
-        req.admin.role !== "supervisor" &&
-        questionnaire.created_by !== req.admin.adminId
-      ) {
+      if (!canManageOwner(req.admin, questionnaire.created_by)) {
         await connection.end();
         return res
           .status(403)
@@ -2366,10 +2430,7 @@ app.put("/api/questionnaires/:id", verifyAdminToken, async (req, res) => {
       await connection.end();
       return res.status(404).json({ success: false, message: "问卷不存在" });
     }
-    if (
-      req.admin.role !== "supervisor" &&
-      qRows[0].created_by !== req.admin.adminId
-    ) {
+    if (!canManageOwner(req.admin, qRows[0].created_by)) {
       await connection.end();
       return res
         .status(403)
@@ -2438,10 +2499,7 @@ app.get(
         await connection.end();
         return res.status(404).json({ success: false, message: "问卷不存在" });
       }
-      if (
-        req.admin.role !== "supervisor" &&
-        qRows[0].created_by !== req.admin.adminId
-      ) {
+      if (!canManageOwner(req.admin, qRows[0].created_by)) {
         await connection.end();
         return res
           .status(403)
@@ -2592,10 +2650,7 @@ app.post(
         await connection.end();
         return res.status(404).json({ success: false, message: "问卷不存在" });
       }
-      if (
-        req.admin.role !== "supervisor" &&
-        qRows[0].created_by !== req.admin.adminId
-      ) {
+      if (!canManageOwner(req.admin, qRows[0].created_by)) {
         await connection.end();
         return res
           .status(403)
@@ -2782,46 +2837,223 @@ app.get(
   },
 );
 
-// 获取所有研究者账号列表（仅导师可用）
-app.get("/api/admins", verifyAdminToken, async (req, res) => {
-  if (req.admin.role !== "supervisor") {
+// ---------- 账号管理 ----------
+// 总账号：管理所有账号（新建总账号/导师/研究者，给研究者分配导师）；
+// 导师：只管理自己名下的研究者（新建的研究者自动归到自己名下）；研究者：只能改自己的密码。
+
+// 当前登录账号的信息（顶栏显示用）
+app.get("/api/admin/me", verifyAdminToken, async (req, res) => {
+  const a = req.admin;
+  try {
+    let supervisorName = null;
+    if (a.supervisorId) {
+      const connection = await mysql.createConnection(dbConfig);
+      const [rows] = await connection.execute(
+        "SELECT display_name FROM admins WHERE id = ?",
+        [a.supervisorId],
+      );
+      await connection.end();
+      supervisorName = rows.length ? rows[0].display_name : null;
+    }
+    res.json({
+      success: true,
+      id: a.adminId,
+      username: a.username,
+      display_name: a.displayName,
+      role: a.role,
+      role_name: ROLE_NAMES[a.role] || a.role,
+      supervisor_id: a.supervisorId,
+      supervisor_name: supervisorName,
+      member_count: a.role === "supervisor" ? a.ownerIds.length - 1 : 0,
+    });
+  } catch (err) {
+    console.error("读取账号信息失败:", err);
+    res.status(500).json({ success: false, message: "服务器错误" });
+  }
+});
+
+// 修改自己的姓名
+app.put("/api/admin/me", verifyAdminToken, async (req, res) => {
+  const name = String(req.body?.display_name || "").trim();
+  if (!name || name.length > 100) {
     return res
-      .status(403)
-      .json({ success: false, message: "仅导师账号可以管理研究者" });
+      .status(400)
+      .json({ success: false, message: "姓名不能为空，也不能太长" });
+  }
+  try {
+    const connection = await mysql.createConnection(dbConfig);
+    await connection.execute(
+      "UPDATE admins SET display_name = ? WHERE id = ?",
+      [name, req.admin.adminId],
+    );
+    await connection.end();
+    clearAccountCache();
+    res.json({ success: true, message: "已保存" });
+  } catch (err) {
+    console.error("修改姓名失败:", err);
+    res.status(500).json({ success: false, message: "服务器错误" });
+  }
+});
+
+// 修改自己的密码（要输入原密码）
+app.put("/api/admin/me/password", verifyAdminToken, async (req, res) => {
+  const { old_password, new_password } = req.body || {};
+  if (!new_password || String(new_password).length < 6) {
+    return res
+      .status(400)
+      .json({ success: false, message: "新密码不能少于6位" });
   }
   try {
     const connection = await mysql.createConnection(dbConfig);
     const [rows] = await connection.execute(
-      "SELECT id, username, display_name, role, created_at FROM admins ORDER BY created_at ASC",
+      "SELECT password_hash FROM admins WHERE id = ?",
+      [req.admin.adminId],
+    );
+    const ok =
+      rows.length > 0 &&
+      (await bcrypt.compare(String(old_password || ""), rows[0].password_hash));
+    if (!ok) {
+      await connection.end();
+      return res.status(400).json({ success: false, message: "原密码不对" });
+    }
+    const hash = await bcrypt.hash(String(new_password), 10);
+    await connection.execute(
+      "UPDATE admins SET password_hash = ? WHERE id = ?",
+      [hash, req.admin.adminId],
     );
     await connection.end();
-    res.json({ success: true, admins: rows });
+    res.json({ success: true, message: "密码已修改" });
+  } catch (err) {
+    console.error("修改密码失败:", err);
+    res.status(500).json({ success: false, message: "服务器错误" });
+  }
+});
+
+// 当前账号能不能管理某个账号（target 是 admins 表的一行）：
+// 总账号能管理除自己以外的所有账号；导师只能管理自己名下的研究者
+function canManageAccount(admin, target) {
+  if (!target || target.id === admin.adminId) return false;
+  if (admin.role === "admin") return true;
+  return (
+    admin.role === "supervisor" &&
+    target.role === "researcher" &&
+    target.supervisor_id === admin.adminId
+  );
+}
+
+async function loadAccountRow(connection, id) {
+  const [rows] = await connection.execute(
+    "SELECT id, username, display_name, role, supervisor_id FROM admins WHERE id = ?",
+    [id],
+  );
+  return rows[0] || null;
+}
+
+// 检查「所属导师」：空表示未分配；否则必须是导师账号。返回 { id } 或 { error }
+async function checkSupervisorId(connection, raw) {
+  if (raw === null || raw === undefined || raw === "") return { id: null };
+  const row = await loadAccountRow(connection, Number(raw));
+  if (!row || row.role !== "supervisor") {
+    return { error: "选择的导师不存在" };
+  }
+  return { id: row.id };
+}
+
+// 只保留确实是研究者的账号 id
+async function researcherIdsOf(connection, raw) {
+  const ids = [...new Set((Array.isArray(raw) ? raw : []).map(Number))].filter(
+    (x) => Number.isInteger(x) && x > 0,
+  );
+  if (ids.length === 0) return [];
+  const [rows] = await connection.execute(
+    `SELECT id FROM admins WHERE role = 'researcher' AND id IN (${ids.map(() => "?").join(", ")})`,
+    ids,
+  );
+  return rows.map((r) => r.id);
+}
+
+// 把导师名下的研究者设成正好是 memberIds 这些人（不在里面的原成员变成未分配）
+async function setMembers(connection, supervisorId, memberIds) {
+  await connection.execute(
+    "UPDATE admins SET supervisor_id = NULL WHERE supervisor_id = ?",
+    [supervisorId],
+  );
+  if (memberIds.length > 0) {
+    await connection.execute(
+      `UPDATE admins SET supervisor_id = ? WHERE role = 'researcher' AND id IN (${memberIds.map(() => "?").join(", ")})`,
+      [supervisorId, ...memberIds],
+    );
+  }
+}
+
+// 账号列表：总账号看全部；导师看自己名下的研究者
+app.get("/api/admins", verifyAdminToken, async (req, res) => {
+  const me = req.admin;
+  if (me.role === "researcher") {
+    return res
+      .status(403)
+      .json({ success: false, message: "研究者账号不能管理账号" });
+  }
+  try {
+    const connection = await mysql.createConnection(dbConfig);
+    const [rows] = await connection.execute(
+      `SELECT a.id, a.username, a.display_name, a.role, a.supervisor_id, a.created_at,
+         s.display_name AS supervisor_name,
+         (SELECT COUNT(*) FROM questionnaires WHERE created_by = a.id) AS questionnaire_count,
+         (SELECT COUNT(*) FROM bundles WHERE created_by = a.id) AS bundle_count,
+         (SELECT COUNT(*) FROM admins m WHERE m.supervisor_id = a.id AND m.role = 'researcher') AS member_count
+       FROM admins a LEFT JOIN admins s ON a.supervisor_id = s.id
+       ${me.role === "admin" ? "" : "WHERE a.supervisor_id = ? AND a.role = 'researcher'"}
+       ORDER BY FIELD(a.role, 'admin', 'supervisor', 'researcher'), a.created_at ASC, a.id ASC`,
+      me.role === "admin" ? [] : [me.adminId],
+    );
+    await connection.end();
+    res.json({
+      success: true,
+      admins: rows.map((r) => ({
+        ...r,
+        role_name: ROLE_NAMES[r.role] || r.role,
+        is_self: r.id === me.adminId,
+        can_manage: canManageAccount(me, r),
+      })),
+    });
   } catch (err) {
     console.error("获取账号列表失败:", err);
     res.status(500).json({ success: false, message: "服务器错误" });
   }
 });
 
-// 新建研究者账号（仅导师可用）
+// 新建账号：总账号可以建总账号、导师、研究者；导师只能建研究者（自动归到自己名下）
 app.post("/api/admins", verifyAdminToken, async (req, res) => {
-  if (req.admin.role !== "supervisor") {
+  const me = req.admin;
+  if (me.role === "researcher") {
     return res
       .status(403)
-      .json({ success: false, message: "仅导师账号可以新建研究者" });
+      .json({ success: false, message: "研究者账号不能新建账号" });
   }
-  const { username, password, display_name, role } = req.body;
-  if (!username || !password || !display_name) {
+  const username = String(req.body.username || "").trim();
+  const password = String(req.body.password || "");
+  const displayName = String(req.body.display_name || "").trim();
+  if (!username || !password || !displayName) {
     return res
       .status(400)
       .json({ success: false, message: "账号、密码、姓名不能为空" });
   }
+  if (username.length > 50 || displayName.length > 100) {
+    return res
+      .status(400)
+      .json({ success: false, message: "账号或姓名太长了" });
+  }
   if (password.length < 6) {
     return res.status(400).json({ success: false, message: "密码不能少于6位" });
   }
+  const role =
+    me.role === "admin" ? req.body.role || "researcher" : "researcher";
+  if (!ROLE_NAMES[role]) {
+    return res.status(400).json({ success: false, message: "角色不对" });
+  }
+  const connection = await mysql.createConnection(dbConfig);
   try {
-    const connection = await mysql.createConnection(dbConfig);
-
-    // 检查账号是否已存在
     const [existing] = await connection.execute(
       "SELECT id FROM admins WHERE username = ?",
       [username],
@@ -2832,27 +3064,156 @@ app.post("/api/admins", verifyAdminToken, async (req, res) => {
         .status(400)
         .json({ success: false, message: "账号名已存在，请换一个" });
     }
+    let supervisorId = null;
+    let memberIds = [];
+    if (role === "researcher") {
+      if (me.role === "supervisor") supervisorId = me.adminId;
+      else {
+        const sup = await checkSupervisorId(connection, req.body.supervisor_id);
+        if (sup.error) {
+          await connection.end();
+          return res.status(400).json({ success: false, message: sup.error });
+        }
+        supervisorId = sup.id;
+      }
+    } else if (role === "supervisor") {
+      memberIds = await researcherIdsOf(connection, req.body.member_ids);
+    }
 
+    await connection.beginTransaction();
     const passwordHash = await bcrypt.hash(password, 10);
-    await connection.execute(
-      "INSERT INTO admins (username, password_hash, display_name, role) VALUES (?, ?, ?, ?)",
-      [username, passwordHash, display_name, role || "researcher"],
+    const [result] = await connection.execute(
+      "INSERT INTO admins (username, password_hash, display_name, role, supervisor_id) VALUES (?, ?, ?, ?, ?)",
+      [username, passwordHash, displayName, role, supervisorId],
     );
+    if (memberIds.length > 0) {
+      await setMembers(connection, result.insertId, memberIds);
+    }
+    await connection.commit();
     await connection.end();
-    res.json({ success: true, message: "账号创建成功" });
+    clearAccountCache();
+    res.json({ success: true, message: "账号创建成功", id: result.insertId });
   } catch (err) {
+    await connection.rollback().catch(() => {});
+    await connection.end().catch(() => {});
     console.error("创建账号失败:", err);
     res.status(500).json({ success: false, message: "服务器错误" });
   }
 });
 
-// 重置某个账号的密码（仅导师可用）
-app.put("/api/admins/:id/password", verifyAdminToken, async (req, res) => {
-  if (req.admin.role !== "supervisor") {
+// 批量分配导师：把几个研究者归到某个导师名下（supervisor_id 为空表示取消分配）。只有总账号可以
+app.post("/api/admins/batch-assign", verifyAdminToken, async (req, res) => {
+  if (req.admin.role !== "admin") {
     return res
       .status(403)
-      .json({ success: false, message: "仅导师账号可以重置密码" });
+      .json({ success: false, message: "只有总账号可以分配导师" });
   }
+  const connection = await mysql.createConnection(dbConfig);
+  try {
+    const sup = await checkSupervisorId(connection, req.body.supervisor_id);
+    if (sup.error) {
+      await connection.end();
+      return res.status(400).json({ success: false, message: sup.error });
+    }
+    const ids = await researcherIdsOf(connection, req.body.researcher_ids);
+    if (ids.length > 0) {
+      await connection.execute(
+        `UPDATE admins SET supervisor_id = ? WHERE id IN (${ids.map(() => "?").join(", ")})`,
+        [sup.id, ...ids],
+      );
+    }
+    await connection.end();
+    clearAccountCache();
+    res.json({ success: true, count: ids.length });
+  } catch (err) {
+    await connection.end().catch(() => {});
+    console.error("分配导师失败:", err);
+    res.status(500).json({ success: false, message: "服务器错误" });
+  }
+});
+
+// 修改账号：姓名（总账号、导师都可以改自己能管理的账号）；
+// 角色、所属导师、名下研究者（只有总账号可以改）
+app.put("/api/admins/:id", verifyAdminToken, async (req, res) => {
+  const me = req.admin;
+  const connection = await mysql.createConnection(dbConfig);
+  try {
+    const target = await loadAccountRow(connection, Number(req.params.id));
+    if (!target) {
+      await connection.end();
+      return res.status(404).json({ success: false, message: "账号不存在" });
+    }
+    if (!canManageAccount(me, target)) {
+      await connection.end();
+      return res
+        .status(403)
+        .json({ success: false, message: "没有权限修改这个账号" });
+    }
+    const displayName =
+      req.body.display_name === undefined
+        ? target.display_name
+        : String(req.body.display_name).trim();
+    if (!displayName) {
+      await connection.end();
+      return res.status(400).json({ success: false, message: "姓名不能为空" });
+    }
+
+    let role = target.role;
+    let supervisorId = target.supervisor_id;
+    let memberIds = null; // null 表示不改名下研究者
+    if (me.role === "admin") {
+      if (req.body.role !== undefined) role = req.body.role;
+      if (!ROLE_NAMES[role]) {
+        await connection.end();
+        return res.status(400).json({ success: false, message: "角色不对" });
+      }
+      if (role === "researcher") {
+        if (req.body.supervisor_id !== undefined) {
+          const sup = await checkSupervisorId(
+            connection,
+            req.body.supervisor_id,
+          );
+          if (sup.error) {
+            await connection.end();
+            return res.status(400).json({ success: false, message: sup.error });
+          }
+          supervisorId = sup.id;
+        } else if (target.role !== "researcher") supervisorId = null;
+      } else {
+        supervisorId = null;
+      }
+      if (role === "supervisor" && Array.isArray(req.body.member_ids)) {
+        memberIds = await researcherIdsOf(connection, req.body.member_ids);
+      }
+    }
+
+    await connection.beginTransaction();
+    // 导师改成别的角色：原来名下的研究者变成未分配
+    if (target.role === "supervisor" && role !== "supervisor") {
+      await connection.execute(
+        "UPDATE admins SET supervisor_id = NULL WHERE supervisor_id = ?",
+        [target.id],
+      );
+    }
+    await connection.execute(
+      "UPDATE admins SET display_name = ?, role = ?, supervisor_id = ? WHERE id = ?",
+      [displayName, role, supervisorId, target.id],
+    );
+    if (memberIds !== null) await setMembers(connection, target.id, memberIds);
+    await connection.commit();
+    await connection.end();
+    clearAccountCache();
+    res.json({ success: true, message: "已保存" });
+  } catch (err) {
+    await connection.rollback().catch(() => {});
+    await connection.end().catch(() => {});
+    console.error("修改账号失败:", err);
+    res.status(500).json({ success: false, message: "服务器错误" });
+  }
+});
+
+// 重置某个账号的密码：总账号可以重置任何人（除自己，自己的密码在右上角修改）；导师只能重置名下研究者
+app.put("/api/admins/:id/password", verifyAdminToken, async (req, res) => {
   const { new_password } = req.body;
   if (!new_password || new_password.length < 6) {
     return res
@@ -2861,10 +3222,18 @@ app.put("/api/admins/:id/password", verifyAdminToken, async (req, res) => {
   }
   try {
     const connection = await mysql.createConnection(dbConfig);
+    const target = await loadAccountRow(connection, Number(req.params.id));
+    if (!canManageAccount(req.admin, target)) {
+      await connection.end();
+      return res.status(target ? 403 : 404).json({
+        success: false,
+        message: target ? "没有权限重置这个账号的密码" : "账号不存在",
+      });
+    }
     const passwordHash = await bcrypt.hash(new_password, 10);
     await connection.execute(
       "UPDATE admins SET password_hash = ? WHERE id = ?",
-      [passwordHash, req.params.id],
+      [passwordHash, target.id],
     );
     await connection.end();
     res.json({ success: true, message: "密码重置成功" });
@@ -2874,26 +3243,79 @@ app.put("/api/admins/:id/password", verifyAdminToken, async (req, res) => {
   }
 });
 
-// 删除研究者账号（仅导师可用，不能删自己）
+// 删除账号：这个人建的问卷、问卷组合、选项模板移交给 transfer_to（导师删名下研究者时一律移交给导师自己）；
+// 删的是导师的话，名下研究者变成未分配。不能删自己。
 app.delete("/api/admins/:id", verifyAdminToken, async (req, res) => {
-  if (req.admin.role !== "supervisor") {
-    return res
-      .status(403)
-      .json({ success: false, message: "仅导师账号可以删除研究者" });
-  }
-  if (Number(req.params.id) === req.admin.adminId) {
-    return res
-      .status(400)
-      .json({ success: false, message: "不能删除自己的账号" });
-  }
+  const me = req.admin;
+  const connection = await mysql.createConnection(dbConfig);
   try {
-    const connection = await mysql.createConnection(dbConfig);
-    await connection.execute("DELETE FROM admins WHERE id = ?", [
-      req.params.id,
-    ]);
+    const target = await loadAccountRow(connection, Number(req.params.id));
+    if (!target) {
+      await connection.end();
+      return res.status(404).json({ success: false, message: "账号不存在" });
+    }
+    if (target.id === me.adminId) {
+      await connection.end();
+      return res
+        .status(400)
+        .json({ success: false, message: "不能删除自己的账号" });
+    }
+    if (!canManageAccount(me, target)) {
+      await connection.end();
+      return res
+        .status(403)
+        .json({ success: false, message: "没有权限删除这个账号" });
+    }
+    const [[owned]] = await connection.execute(
+      `SELECT (SELECT COUNT(*) FROM questionnaires WHERE created_by = ?) AS q,
+              (SELECT COUNT(*) FROM bundles WHERE created_by = ?) AS b`,
+      [target.id, target.id],
+    );
+    let transferTo =
+      me.role === "admin" ? Number(req.body?.transfer_to) : me.adminId;
+    if (owned.q + owned.b > 0) {
+      const dest =
+        transferTo && transferTo !== target.id
+          ? await loadAccountRow(connection, transferTo)
+          : null;
+      if (!dest) {
+        await connection.end();
+        return res.status(400).json({
+          success: false,
+          message: `这个账号有 ${owned.q} 份问卷、${owned.b} 个问卷组合，请选择移交给谁`,
+        });
+      }
+    } else if (!transferTo || transferTo === target.id) {
+      transferTo = null;
+    }
+
+    await connection.beginTransaction();
+    if (transferTo) {
+      for (const table of ["questionnaires", "bundles", "option_templates"]) {
+        await connection.execute(
+          `UPDATE ${table} SET created_by = ? WHERE created_by = ?`,
+          [transferTo, target.id],
+        );
+      }
+    }
+    await connection.execute(
+      "UPDATE admins SET supervisor_id = NULL WHERE supervisor_id = ?",
+      [target.id],
+    );
+    await connection.execute("DELETE FROM admins WHERE id = ?", [target.id]);
+    await connection.commit();
     await connection.end();
-    res.json({ success: true, message: "账号已删除" });
+    clearAccountCache();
+    res.json({
+      success: true,
+      message:
+        owned.q + owned.b > 0
+          ? `账号已删除，${owned.q} 份问卷、${owned.b} 个问卷组合已移交`
+          : "账号已删除",
+    });
   } catch (err) {
+    await connection.rollback().catch(() => {});
+    await connection.end().catch(() => {});
     console.error("删除账号失败:", err);
     res.status(500).json({ success: false, message: "服务器错误" });
   }
@@ -2936,10 +3358,7 @@ app.post(
         await connection.end();
         return res.status(404).json({ success: false, message: "问卷不存在" });
       }
-      if (
-        req.admin.role !== "supervisor" &&
-        qRows[0].created_by !== req.admin.adminId
-      ) {
+      if (!canManageOwner(req.admin, qRows[0].created_by)) {
         await connection.end();
         return res
           .status(403)
@@ -3287,10 +3706,7 @@ app.post(
         await connection.end();
         return res.status(404).json({ success: false, message: "问卷不存在" });
       }
-      if (
-        req.admin.role !== "supervisor" &&
-        qRows[0].created_by !== req.admin.adminId
-      ) {
+      if (!canManageOwner(req.admin, qRows[0].created_by)) {
         await connection.end();
         return res
           .status(403)
@@ -3433,10 +3849,7 @@ app.post(
         await connection.end();
         return res.status(404).json({ success: false, message: "问卷不存在" });
       }
-      if (
-        req.admin.role !== "supervisor" &&
-        qRows[0].created_by !== req.admin.adminId
-      ) {
+      if (!canManageOwner(req.admin, qRows[0].created_by)) {
         await connection.end();
         return res.status(403).json({ success: false, message: "没有权限" });
       }
@@ -3614,7 +4027,7 @@ async function computeStats(connection, questionnaireId, admin, opts) {
   );
   if (qRows.length === 0)
     return { error: { status: 404, message: "问卷不存在" } };
-  if (admin.role !== "supervisor" && qRows[0].created_by !== admin.adminId) {
+  if (!canManageOwner(admin, qRows[0].created_by)) {
     return { error: { status: 403, message: "没有权限查看这份问卷的数据" } };
   }
   const totalFormula = qRows[0].total_formula || "dimensions";
@@ -4991,7 +5404,7 @@ async function checkBundleAccess(connection, bundleId, admin) {
     [bundleId],
   );
   if (rows.length === 0) return "notfound";
-  if (admin.role !== "supervisor" && rows[0].created_by !== admin.adminId) {
+  if (!canManageOwner(admin, rows[0].created_by)) {
     return "forbidden";
   }
   return "ok";
@@ -5020,13 +5433,13 @@ async function loadBundleQuestionnaires(connection, bundleId) {
 app.get("/api/bundles", verifyAdminToken, async (req, res) => {
   try {
     const connection = await mysql.createConnection(dbConfig);
-    const isSup = req.admin.role === "supervisor";
+    const f = ownerFilter(req.admin, "b.created_by");
     const [bundles] = await connection.execute(
       `SELECT b.*, a.display_name AS creator_name FROM bundles b
        LEFT JOIN admins a ON b.created_by = a.id
-       ${isSup ? "" : "WHERE b.created_by = ?"}
+       ${f.sql ? `WHERE ${f.sql}` : ""}
        ORDER BY b.created_at DESC`,
-      isSup ? [] : [req.admin.adminId],
+      f.params,
     );
     for (const b of bundles) {
       b.questionnaires = await loadBundleQuestionnaires(connection, b.id);
@@ -5820,7 +6233,7 @@ async function checkQuestionnaireAccess(connection, questionnaireId, admin) {
     [questionnaireId],
   );
   if (rows.length === 0) return "notfound";
-  if (admin.role !== "supervisor" && rows[0].created_by !== admin.adminId) {
+  if (!canManageOwner(admin, rows[0].created_by)) {
     return "forbidden";
   }
   return "ok";
@@ -6030,10 +6443,7 @@ app.delete("/api/option-templates/:id", verifyAdminToken, async (req, res) => {
       await connection.end();
       return res.status(404).json({ success: false, message: "模板不存在" });
     }
-    if (
-      req.admin.role !== "supervisor" &&
-      rows[0].created_by !== req.admin.adminId
-    ) {
+    if (!canManageOwner(req.admin, rows[0].created_by)) {
       await connection.end();
       return res
         .status(403)

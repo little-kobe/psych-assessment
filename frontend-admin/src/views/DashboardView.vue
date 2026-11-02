@@ -55,15 +55,34 @@ async function fetchQuestionnaires() {
   }
 }
 
+// 按创建人筛选（总账号、导师能看到几个人的问卷时才显示）
+const creatorFilter = ref("");
+const creators = computed(() => {
+  const map = new Map();
+  questionnaires.value.forEach((q) => {
+    const key = String(q.created_by ?? "");
+    if (!map.has(key))
+      map.set(key, { value: key, label: q.creator_name || "未知", count: 0 });
+    map.get(key).count++;
+  });
+  return [...map.values()];
+});
+
 const filtered = computed(() => {
   const k = keyword.value.trim().toLowerCase();
-  if (!k) return questionnaires.value;
-  return questionnaires.value.filter(
-    (q) =>
+  return questionnaires.value.filter((q) => {
+    if (
+      creatorFilter.value &&
+      String(q.created_by ?? "") !== creatorFilter.value
+    )
+      return false;
+    if (!k) return true;
+    return (
       q.title.toLowerCase().includes(k) ||
       (q.description || "").toLowerCase().includes(k) ||
-      String(q.id) === k,
-  );
+      String(q.id) === k
+    );
+  });
 });
 
 function openCreate() {
@@ -158,6 +177,20 @@ onMounted(fetchQuestionnaires);
         </p>
       </div>
       <div class="head-actions">
+        <el-select
+          v-if="creators.length > 1"
+          v-model="creatorFilter"
+          placeholder="全部创建人"
+          clearable
+          style="width: 160px"
+        >
+          <el-option
+            v-for="c in creators"
+            :key="c.value"
+            :value="c.value"
+            :label="`${c.label}（${c.count}）`"
+          />
+        </el-select>
         <el-input
           v-model="keyword"
           :prefix-icon="Search"
@@ -261,7 +294,7 @@ onMounted(fetchQuestionnaires);
           >
         </template>
         <template v-else>
-          <div class="empty-title">没有找到「{{ keyword }}」</div>
+          <div class="empty-title">没有符合条件的问卷</div>
           <div class="empty-sub">换个关键词试试</div>
         </template>
       </div>
